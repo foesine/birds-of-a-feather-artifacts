@@ -1,0 +1,207 @@
+---
+title: "pred_on_svmsyn"
+output: html_document
+date: "2026-09-16"
+---
+ 
+# Packages
+```{r}
+ 
+# List of required packages
+list_of_packages <- c("MASS", "ggplot2", "dplyr", "caret", "rpart", "tidyr", "here", "glmnet" ,"synthpop", "purrr", "MonteCarlo", "tidyverse", "Matrix", "caret", "e1071", "bnlearn", "future", "furrr", "kernlab")
+ 
+# Function to install a package if it is not already installed
+install_if_missing <- function(p){
+  if(!requireNamespace(p, quietly = TRUE)){install.packages(p)}
+  library(p, character.only=TRUE)}
+ 
+# Install and load packages
+lapply(list_of_packages, install_if_missing)
+ 
+```
+ 
+# Load data
+```{r}
+load(here::here("data", "svm_hiersyn.RData"))
+load(here::here("data", "svm_linsyn.RData"))
+ 
+cat("Hierarchical SVM synthetic datasets:", length(svm_hiersyn), "\n")
+cat("Linear SVM synthetic datasets:", length(svm_linsyn), "\n")
+```
+ 
+# Load functions
+ 
+```{r}
+source(here::here("code", "prediction.R"))
+```
+ 
+# Settings
+ 
+```{r}
+ 
+workers <- 4
+ 
+# Predictor restrictions
+restrict_hier <- FALSE
+restrict_linear <- TRUE
+ 
+# Expected number of synthetic datasets:
+# 3 p-values x 5 simulation replications x 5 synthesis replications = 75
+expected_n <- 3 * 5 * 5
+ 
+if (length(svm_hiersyn) != expected_n) {
+  warning("svm_hiersyn contains ", length(svm_hiersyn),
+          " datasets; expected ", expected_n, ".")
+}
+ 
+if (length(svm_linsyn) != expected_n) {
+  warning("svm_linsyn contains ", length(svm_linsyn),
+          " datasets; expected ", expected_n, ".")
+}
+ 
+```
+ 
+# Apply predictions
+ 
+## Parametric prediction
+ 
+### Hierarchical simulation
+```{r}
+parmpred_svmhiersyn <- run_prediction_grid(
+  data_object = svm_hiersyn,
+  prediction_function = parm_pred,
+  output_file = "parmpred_svmhiersyn",
+  synmc_values = 1:5,
+  restrict_predictors = restrict_hier,
+  workers = workers)
+ 
+```
+ 
+### Parametric simulation
+```{r}
+parmpred_svmlinsyn <- run_prediction_grid(
+  data_object = svm_linsyn,
+  prediction_function = parm_pred,
+  output_file = "parmpred_svmlinsyn",
+  synmc_values = 1:5,
+  restrict_predictors = restrict_linear,
+  workers = workers)
+ 
+```
+ 
+## CART prediction
+ 
+### Hierarchical simulation
+```{r}
+cartpred_svmhiersyn <- run_prediction_grid(
+  data_object = svm_hiersyn,
+  prediction_function = cart_pred,
+  output_file = "cartpred_svmhiersyn",
+  synmc_values = 1:5,
+  restrict_predictors = restrict_hier,
+  workers = workers)
+ 
+```
+ 
+### Parametric simulation
+```{r}
+cartpred_svmlinsyn <- run_prediction_grid(
+  data_object = svm_linsyn,
+  prediction_function = cart_pred,
+  output_file = "cartpred_svmlinsyn",
+  synmc_values = 1:5,
+  restrict_predictors = restrict_linear,
+  workers = workers)
+ 
+```
+ 
+## Bayesian Network prediction
+ 
+### Hierarchical simulation
+```{r}
+bnpred_svmhiersyn <- run_prediction_grid(
+  data_object = svm_hiersyn,
+  prediction_function = bn_pred,
+  output_file = "bnpred_svmhiersyn",
+  synmc_values = 1:5,
+  restrict_predictors = restrict_hier,
+  workers = workers)
+ 
+```
+ 
+### Parametric simulation
+```{r}
+bnpred_svmlinsyn <- run_prediction_grid(
+  data_object = svm_linsyn,
+  prediction_function = bn_pred,
+  output_file = "bnpred_svmlinsyn",
+  synmc_values = 1:5,
+  restrict_predictors = restrict_linear,
+  workers = workers)
+ 
+```
+ 
+## SVM prediction
+ 
+### Hierarchical simulation
+```{r}
+svmpred_svmhiersyn <- run_prediction_grid(
+  data_object = svm_hiersyn,
+  prediction_function = svm_pred,
+  output_file = "svmpred_svmhiersyn",
+  synmc_values = 1:5,
+  restrict_predictors = restrict_hier,
+  workers = workers)
+ 
+```
+ 
+### Parametric simulation
+```{r}
+svmpred_svmlinsyn <- run_prediction_grid(
+  data_object = svm_linsyn,
+  prediction_function = svm_pred,
+  output_file = "svmpred_svmlinsyn",
+  synmc_values = 1:5,
+  restrict_predictors = restrict_linear,
+  workers = workers)
+ 
+```
+ 
+# Validate outputs
+```{r}
+prediction_objects <- c(
+  "parmpred_svmhiersyn",
+  "parmpred_svmlinsyn",
+  "cartpred_svmhiersyn",
+  "cartpred_svmlinsyn",
+  "bnpred_svmhiersyn",
+  "bnpred_svmlinsyn",
+  "svmpred_svmhiersyn",
+  "svmpred_svmlinsyn"
+)
+ 
+for (obj in prediction_objects) {
+ 
+  if (!exists(obj)) {
+    warning(obj, " does not exist.")
+    next
+  }
+ 
+  x <- get(obj)
+ 
+  if (length(x) != expected_n) {
+    warning(
+      obj, " contains ", length(x),
+      " results; expected ", expected_n, "."
+    )
+  } else {
+    cat(obj, ":", length(x), "results -- OK\n")
+  }
+}
+ 
+```
+ 
+# Reset parallel backend
+```{r}
+future::plan(future::sequential)
+```

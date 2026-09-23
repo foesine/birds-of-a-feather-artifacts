@@ -1,0 +1,751 @@
+---
+title: "Analyze_real_data"
+format: html
+editor: visual
+---
+
+# Packages
+
+```{r}
+# List of required packages
+list_of_packages <- c("MASS", "ggplot2", "dplyr", "caret", "rpart", "tidyr", "here", "glmnet" ,"synthpop", "purrr", "MonteCarlo", "tidyverse", "Matrix", "caret", "e1071", "stringr", "tidyr", "bnlearn", "tibble", "gridExtra", "dplyr") #, "kernlab"
+
+# Function to install a package if it is not already installed
+install_if_missing <- function(p){
+  if(!requireNamespace(p, quietly = TRUE)){
+    install.packages(p)
+  }
+  library(p, character.only=TRUE)
+}
+
+# Install and load packages
+lapply(list_of_packages, install_if_missing)
+#library()
+```
+
+# Directories
+
+```{r}
+data_dir <- here::here("data", "real_data", "data")
+figure_dir <- here::here("results", "figures")
+table_dir <- here::here("results", "additional_materials")
+ 
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Compare prediction metrics
+
+```{r}
+compare_pred_results <- function(dataset_name,
+                                 target_type = c("classification", "regression"),
+                                 save_plot = TRUE) {
+  target_type <- match.arg(target_type)
+  pred_methods  <- c("parm", "cart", "bn", "svm")
+  synth_methods <- c("parmsyn", "cartsyn", "bnsyn", "svmsyn")
+  synth_seeds   <- paste0("synmc", 1:5)
+ 
+  if (target_type == "regression") {
+    pred_methods <- setdiff(pred_methods, "bn")
+    synth_methods <- setdiff(synth_methods, "bnsyn")
+  }
+ 
+  pred_colors <- c(
+    cartpred = "#82c074",
+    bnpred   = "#54bdbf",
+    parmpred = "#e9496a",
+    svmpred  = "#ed9656"
+  )
+ 
+  plot_title <- paste("Prediction performance comparison:", dataset_name)
+  plot_filename <- paste0("pred_perf_comp_", dataset_name, ".png")
+  plot_path <- file.path(figure_dir, plot_filename)
+ 
+  # load original results
+  orig_list <- lapply(pred_methods, function(pred_method) {
+    file_path <- file.path(data_dir, paste0(dataset_name, "_orig_", pred_method, ".RData"))
+    if (!file.exists(file_path)) {
+      message("Original file not found: ", file_path)
+      return(NULL)
+    }
+    obj_name <- load(file_path)
+    obj <- get(obj_name)
+    rm(list = obj_name)
+ 
+    obj %>%
+      mutate(
+        dataset = dataset_name,
+        data_type = "original",
+        synth_method = "original",
+        synth_seed = NA_character_,
+        pred_method = pred_method
+      )
+  })
+ 
+  orig_df <- bind_rows(orig_list)
+ 
+  # load synthetic results
+  syn_list <- list()
+ 
+  for (synth_method in synth_methods) {
+    for (synth_seed in synth_seeds) {
+      for (pred_method in pred_methods) {
+        file_path <- file.path(
+          data_dir,
+          paste0(dataset_name, "_", synth_method, "_", synth_seed, "_", pred_method, "pred.RData")
+        )
+ 
+        if (!file.exists(file_path)) next
+ 
+        obj_name <- load(file_path)
+        obj <- get(obj_name)
+        rm(list = obj_name)
+ 
+        syn_list[[paste(synth_method, synth_seed, pred_method, sep = "_")]] <- obj %>%
+          mutate(
+            dataset = dataset_name,
+            data_type = "synthetic",
+            synth_method = synth_method,
+            synth_seed = synth_seed,
+            pred_method = pred_method
+          )
+      }
+    }
+  }
+ 
+  syn_df <- bind_rows(syn_list)
+  all_df <- bind_rows(orig_df, syn_df)
+ 
+  id_cols <- c("dataset", "data_type", "synth_method", "synth_seed", "pred_method")
+  metric_cols <- setdiff(names(all_df), id_cols)
+ 
+  synth_levels <- c("original", "parmsyn", "cartsyn", "bnsyn", "svmsyn")
+  synth_labels <- c(
+    original = "original data",
+    parmsyn  = "param. syn.",
+    cartsyn  = "CART syn.",
+    bnsyn    = "BN syn.",
+    svmsyn   = "SVM syn."
+  )
+ 
+  if (target_type == "regression") {
+    synth_levels <- c("original", "parmsyn", "cartsyn", "svmsyn")
+    synth_labels <- synth_labels[synth_levels]
+  }
+ 
+  plot_df <- all_df %>%
+    pivot_longer(
+      cols = all_of(metric_cols),
+      names_to = "metric",
+      values_to = "value"
+    ) %>%
+    mutate(
+      pred_method_plot = factor(
+        paste0(pred_method, "pred"),
+        levels = c("parmpred", "cartpred", "bnpred", "svmpred")
+      ),
+      synth_method = factor(
+        synth_method,
+        levels = synth_levels,
+        labels = synth_labels
+      )
+    ) %>%
+    filter(!is.na(value))
+ 
+  metric_ranges <- plot_df %>%
+    group_by(metric) %>%
+    summarise(
+      ymin = min(value, na.rm = TRUE),
+      ymax = max(value, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    tidyr::crossing(
+      synth_method = factor(synth_labels, levels = synth_labels),
+      pred_method_plot = levels(plot_df$pred_method_plot)
+    )
+ 
+  p <- ggplot(
+    plot_df,
+    aes(x = pred_method_plot, y = value, color = pred_method_plot)
+  ) +
+    geom_blank(
+      data = metric_ranges,
+      aes(x = pred_method_plot, y = ymin),
+      inherit.aes = FALSE
+    ) +
+    geom_blank(
+      data = metric_ranges,
+      aes(x = pred_method_plot, y = ymax),
+      inherit.aes = FALSE
+    ) +
+    geom_jitter(
+      width = 0.24,
+      height = 0,
+      size = 2.2,
+      alpha = 1,
+      shape = 16
+    ) +
+    facet_grid(
+      metric ~ synth_method,
+      scales = "free_y"
+    ) +
+    scale_color_manual(
+      values = pred_colors,
+      name = "Prediction method"
+    ) +
+    labs(
+      title = NULL,
+      x = NULL,
+      y = "Metric value"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.spacing.x = grid::unit(0.9, "lines"),
+      panel.spacing.y = grid::unit(0.9, "lines")
+    )
+ 
+  if (save_plot) {
+    if (!dir.exists(figure_dir)) {
+      dir.create(figure_dir, recursive = TRUE)
+    }
+ 
+    ggsave(
+      filename = plot_path,
+      plot = p,
+      width = 12,
+      height = 8,
+      dpi = 300
+    )
+  }
+ 
+  list(
+    all_data = all_df,
+    plot_data = plot_df,
+    plot = p,
+    plot_path = if (save_plot) plot_path else NA_character_
+  )
+}
+```
+
+## Adult
+
+```{r}
+Adult_comp<-compare_pred_results("Adult", target_type = "classification")
+Adult_comp$plot
+```
+
+## BankMarketing
+
+```{r}
+BankMarketing_comp<-compare_pred_results("BankMarketing", target_type = "classification")
+BankMarketing_comp$plot
+```
+
+## BikeSharing
+
+```{r}
+BikeSharing_comp<-compare_pred_results("BikeSharing", target_type = "regression")
+BikeSharing_comp$plot
+```
+
+## GermanCredit
+
+```{r}
+GermanCredit_comp<-compare_pred_results("GermanCredit")
+GermanCredit_comp$plot
+```
+
+# Compare reinforcement ratio
+
+```{r}
+compute_reinforcement_real <- function(dataset_name,
+                                       target_type = c("classification", "regression"),
+                                       save_plot = TRUE) {
+  target_type <- match.arg(target_type)
+  higher_better <- c("Accuracy", "F1", "Specificity", "Sensitivity", "R_squared")
+  lower_better  <- c("RMSE", "MAE")
+  pred_methods  <- c("parm", "cart", "bn", "svm")
+  synth_methods <- c("parmsyn", "cartsyn", "bnsyn", "svmsyn")
+  synth_seeds   <- paste0("synmc", 1:5)
+  if (target_type == "regression") {
+    synth_methods <- setdiff(synth_methods, "bnsyn")
+  }
+  family_from_model <- function(x) {
+    dplyr::case_when(
+      str_detect(x, "^cart") ~ "cart",
+      str_detect(x, "^svm")  ~ "svm",
+      str_detect(x, "^parm") ~ "parm",
+      str_detect(x, "^bn")   ~ "bn",
+      TRUE ~ NA_character_
+    )
+  }
+  family_palette <- c(
+    cart = "#82c074",
+    bn   = "#54bdbf",
+    parm = "#e9496a",
+    svm  = "#ed9656"
+  )
+  family_labels <- c(
+    parm = "Parametric Syn.",
+    cart = "CART Syn.",
+    bn   = "BN Syn.",
+    svm  = "SVM Syn."
+  )
+  family_order <- c("parm", "cart", "bn", "svm")
+  if (target_type == "regression") {
+    family_order <- setdiff(family_order, "bn")
+    family_labels <- family_labels[family_order]
+  }
+  # ----------------------------
+  # load original results
+  # ----------------------------
+  orig_list <- lapply(pred_methods, function(pred_method) {
+    file_path <- file.path(data_dir, paste0(dataset_name, "_orig_", pred_method, ".RData"))
+    if (!file.exists(file_path)) {
+      message("Original file not found: ", file_path)
+      return(NULL)
+    }
+    obj_name <- load(file_path)
+    obj <- get(obj_name)
+    rm(list = obj_name)
+    obj %>%
+      mutate(
+        dataset = dataset_name,
+        data_type = "original",
+        synth_method = NA_character_,
+        synth_seed = NA_character_,
+        Prediction_Model = paste0(pred_method, "pred")
+      )
+  })
+  orig_df <- bind_rows(orig_list)
+  # ----------------------------
+  # load synthetic results
+  # ----------------------------
+  syn_list <- list()
+  for (synth_method in synth_methods) {
+    for (synth_seed in synth_seeds) {
+      for (pred_method in pred_methods) {
+        file_path <- file.path(
+          data_dir,
+          paste0(dataset_name, "_", synth_method, "_", synth_seed, "_", pred_method, "pred.RData")
+        )
+        if (!file.exists(file_path)) next
+        obj_name <- load(file_path)
+        obj <- get(obj_name)
+        rm(list = obj_name)
+        syn_list[[paste(synth_method, synth_seed, pred_method, sep = "_")]] <- obj %>%
+          mutate(
+            dataset = dataset_name,
+            data_type = "synthetic",
+            synth_method = synth_method,
+            synth_seed = synth_seed,
+            Prediction_Model = paste0(pred_method, "pred"),
+            Synthesis_Model = synth_method
+          )
+      }
+    }
+  }
+  syn_df <- bind_rows(syn_list)
+  # ----------------------------
+  # combine and pivot long
+  # ----------------------------
+  all_df <- bind_rows(orig_df, syn_df)
+  id_cols <- c(
+    "dataset", "data_type", "synth_method", "synth_seed",
+    "Prediction_Model", "Synthesis_Model"
+  )
+  metric_cols <- setdiff(names(all_df), id_cols)
+  long_df <- all_df %>%
+    pivot_longer(
+      cols = all_of(metric_cols),
+      names_to = "Metric",
+      values_to = "Value"
+    ) %>%
+    filter(!is.na(Value)) %>%
+    mutate(
+      TargetType = ifelse(target_type == "regression", "Continuous", "Categorical"),
+      Synth_Family = family_from_model(Synthesis_Model),
+      Pred_Family  = family_from_model(Prediction_Model)
+    )
+  # remove BN cases for regression
+  if (target_type == "regression") {
+    long_df <- long_df %>%
+      filter(Pred_Family != "bn") %>%
+      filter(Synth_Family != "bn" | is.na(Synth_Family))
+  }
+  # ----------------------------
+  # relative-to-best within original and synthetic
+  # ----------------------------
+  orig_rel <- long_df %>%
+    filter(data_type == "original") %>%
+    group_by(dataset, Metric) %>%
+    mutate(
+      best_val = case_when(
+        Metric %in% higher_better ~ max(Value, na.rm = TRUE),
+        Metric %in% lower_better  ~ min(Value, na.rm = TRUE),
+        TRUE ~ NA_real_
+      ),
+      rel_orig = case_when(
+        Metric %in% higher_better ~ Value / best_val,
+        Metric %in% lower_better  ~ best_val / Value,
+        TRUE ~ NA_real_
+      )
+    ) %>%
+    ungroup() %>%
+    dplyr::select(dataset, Metric, Pred_Family, Prediction_Model, rel_orig)
+  synth_rel <- long_df %>%
+    filter(data_type == "synthetic") %>%
+    group_by(dataset, synth_method, synth_seed, Metric) %>%
+    mutate(
+      best_val = case_when(
+        Metric %in% higher_better ~ max(Value, na.rm = TRUE),
+        Metric %in% lower_better  ~ min(Value, na.rm = TRUE),
+        TRUE ~ NA_real_
+      ),
+      rel_synth = case_when(
+        Metric %in% higher_better ~ Value / best_val,
+        Metric %in% lower_better  ~ best_val / Value,
+        TRUE ~ NA_real_
+      )
+    ) %>%
+    ungroup() %>%
+    dplyr::select(dataset, synth_method, synth_seed, Metric,
+           Synth_Family, Pred_Family, Prediction_Model, rel_synth)
+  # ----------------------------
+  # keep same-family synthetic only
+  # ----------------------------
+  synth_same <- synth_rel %>%
+    filter(Synth_Family == Pred_Family)
+  # ----------------------------
+  # join with original and compute reinforcement
+  # ----------------------------
+  reinforce <- synth_same %>%
+    left_join(
+      orig_rel %>% dplyr::select(dataset, Metric, Pred_Family, rel_orig),
+      by = c("dataset", "Metric", "Pred_Family")
+    ) %>%
+    mutate(
+      Reinforcement = rel_synth / rel_orig
+    )
+  # average over synthetic seeds
+  reinforce_avg <- reinforce %>%
+    group_by(dataset, Metric, Synth_Family) %>%
+    summarise(
+      Reinforcement = mean(Reinforcement, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Synth_Family = factor(Synth_Family, levels = family_order)
+    )
+  # plot function
+  plot_reinforcement <- function(metric_name) {
+  df_sub <- reinforce %>%
+    filter(Metric == metric_name) %>%
+    mutate(
+      Synth_Family = factor(Synth_Family, levels = family_order)
+    )
+ 
+  if (nrow(df_sub) == 0) {
+    return(
+      ggplot() +
+        labs(title = NULL) +
+        theme_void()
+    )
+  }
+ 
+  p <- ggplot(df_sub, aes(x = Synth_Family, y = Reinforcement, color = Synth_Family)) +
+    geom_jitter(width = 0.12, height = 0, size = 2.2, alpha = 1, shape = 16) +
+    geom_hline(yintercept = 1, linetype = "dotted") +
+    scale_color_manual(
+      values = family_palette[family_order],
+      breaks = family_order,
+      labels = family_labels[family_order],
+      name = "Synthesis model"
+    ) +
+    scale_x_discrete(labels = family_labels[family_order]) +
+    labs(
+      title = NULL,
+      x = NULL,
+      y = "R"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 20, hjust = 1),
+      panel.grid.minor = element_blank()
+    )
+ 
+  if (save_plot) {
+    if (!dir.exists(figure_dir)) {
+      dir.create(figure_dir, recursive = TRUE)
+    }
+ 
+    plot_filename <- paste0("reinf_", dataset_name, "_", metric_name, ".png")
+    plot_path <- file.path(figure_dir, plot_filename)
+ 
+    ggsave(
+      filename = plot_path,
+      plot = p,
+      width = 8,
+      height = 6,
+      dpi = 300
+    )
+  }
+ 
+  p
+}
+  list(
+    long_data = long_df,
+    reinforce = reinforce,
+    reinforce_avg = reinforce_avg,
+    plot_metric = plot_reinforcement
+  )
+}
+```
+
+## Adult
+
+```{r}
+Adult_reinf <- compute_reinforcement_real("Adult", target_type = "classification")
+```
+
+```{r}
+Adult_reinf$plot_metric("Accuracy")
+Adult_reinf$plot_metric("F1")
+Adult_reinf$plot_metric("Specificity")
+Adult_reinf$plot_metric("Sensitivity")
+```
+
+## BankMarketing
+
+```{r}
+BankMarketing_reinf <- compute_reinforcement_real("BankMarketing", target_type = "classification")
+```
+
+```{r}
+BankMarketing_reinf$plot_metric("Accuracy")
+BankMarketing_reinf$plot_metric("F1")
+BankMarketing_reinf$plot_metric("Specificity")
+BankMarketing_reinf$plot_metric("Sensitivity")
+```
+
+## BikeSharing
+
+```{r}
+BikeSharing_reinf <- compute_reinforcement_real("BikeSharing", target_type = "regression")
+```
+
+```{r}
+BikeSharing_reinf$plot_metric("RMSE")
+BikeSharing_reinf$plot_metric("R_squared")
+BikeSharing_reinf$plot_metric("MAE")
+```
+
+## GermanCredit
+
+```{r}
+GermanCredit_reinf <- compute_reinforcement_real("GermanCredit", target_type = "classification")
+```
+
+```{r}
+GermanCredit_reinf$plot_metric("Accuracy")
+GermanCredit_reinf$plot_metric("F1")
+GermanCredit_reinf$plot_metric("Specificity")
+GermanCredit_reinf$plot_metric("Sensitivity")
+```
+
+# Rank Metrics
+
+```{r}
+safe_cor <- function(x, y, method = "spearman") {
+  ok <- complete.cases(x, y)
+ 
+  if (sum(ok) < 2) return(NA_real_)
+  if (length(unique(x[ok])) < 2) return(NA_real_)
+  if (length(unique(y[ok])) < 2) return(NA_real_)
+ 
+  tryCatch(
+    suppressWarnings(cor(x[ok], y[ok], method = method)),
+    error = function(e) NA_real_
+  )
+}
+ 
+compute_ranking_real <- function(long_df, target_type = c("classification", "regression")) {
+ 
+  target_type <- match.arg(target_type)
+ 
+  higher_better <- c("Accuracy", "F1", "Specificity", "Sensitivity", "R_squared")
+  lower_better  <- c("RMSE", "MAE")
+ 
+  family_from_model <- function(x) {
+    dplyr::case_when(
+      stringr::str_detect(x, "^cart") ~ "cart",
+      stringr::str_detect(x, "^svm")  ~ "svm",
+      stringr::str_detect(x, "^parm") ~ "parm",
+      stringr::str_detect(x, "^bn")   ~ "bn",
+      TRUE ~ NA_character_
+    )
+  }
+ 
+  rank_df <- long_df %>%
+    dplyr::mutate(
+      Pred_Family = family_from_model(Prediction_Model),
+      Synth_Family = family_from_model(Synthesis_Model)
+    )
+ 
+  if (target_type == "regression") {
+    rank_df <- rank_df %>%
+      dplyr::filter(Pred_Family != "bn") %>%
+      dplyr::filter(Synth_Family != "bn" | is.na(Synth_Family))
+  }
+ 
+  # ----------------------------
+  # Original rankings
+  # ----------------------------
+ 
+  orig_rank <- rank_df %>%
+    dplyr::filter(data_type == "original") %>%
+    dplyr::group_by(dataset, Metric) %>%
+    dplyr::mutate(
+      rank_orig = dplyr::case_when(
+        dplyr::first(Metric) %in% higher_better ~ rank(-Value, ties.method = "average"),
+        dplyr::first(Metric) %in% lower_better  ~ rank(Value, ties.method = "average"),
+        TRUE ~ NA_real_
+      ),
+      best_rank_orig = min(rank_orig, na.rm = TRUE),
+      best_orig = rank_orig == best_rank_orig
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(
+      dataset,
+      Metric,
+      Prediction_Model,
+      Pred_Family,
+      value_orig = Value,
+      rank_orig,
+      best_orig
+    )
+ 
+  # ----------------------------
+  # Synthetic rankings
+  # ----------------------------
+ 
+  synth_rank <- rank_df %>%
+    dplyr::filter(data_type == "synthetic") %>%
+    dplyr::group_by(dataset, synth_method, synth_seed, Synth_Family, Metric) %>%
+    dplyr::mutate(
+      rank_synth = dplyr::case_when(
+        dplyr::first(Metric) %in% higher_better ~ rank(-Value, ties.method = "average"),
+        dplyr::first(Metric) %in% lower_better  ~ rank(Value, ties.method = "average"),
+        TRUE ~ NA_real_
+      ),
+      best_rank_synth = min(rank_synth, na.rm = TRUE),
+      best_synth = rank_synth == best_rank_synth
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(
+      dataset,
+      synth_method,
+      synth_seed,
+      Synth_Family,
+      Metric,
+      Prediction_Model,
+      Pred_Family,
+      value_synth = Value,
+      rank_synth,
+      best_synth
+    )
+ 
+  # ----------------------------
+  # Compare rankings
+  # ----------------------------
+ 
+  rank_compare <- synth_rank %>%
+    dplyr::left_join(
+      orig_rank,
+      by = c(
+        "dataset",
+        "Metric",
+        "Prediction_Model",
+        "Pred_Family"
+      )
+    )
+ 
+  ranking_metrics <- rank_compare %>%
+    dplyr::group_by(
+      dataset,
+      synth_method,
+      synth_seed,
+      Synth_Family,
+      Metric
+    ) %>%
+    dplyr::summarise(
+      top1_agreement =
+        any(best_orig & best_synth, na.rm = TRUE),
+ 
+      synthetic_best_is_same_family =
+        any(best_synth & Pred_Family == Synth_Family, na.rm = TRUE),
+ 
+      original_best_is_synth_family =
+        any(best_orig & Pred_Family == Synth_Family, na.rm = TRUE),
+ 
+      spearman_rho =
+        safe_cor(rank_orig, rank_synth, method = "spearman"),
+ 
+      kendall_tau =
+        safe_cor(rank_orig, rank_synth, method = "kendall"),
+ 
+      .groups = "drop"
+    )
+ 
+  ranking_summary <- ranking_metrics %>%
+    dplyr::group_by(
+      dataset,
+      synth_method,
+      Synth_Family,
+      Metric
+    ) %>%
+    dplyr::summarise(
+      top1_agreement = mean(top1_agreement, na.rm = TRUE),
+      synthetic_best_is_same_family = mean(synthetic_best_is_same_family, na.rm = TRUE),
+      original_best_is_synth_family = mean(original_best_is_synth_family, na.rm = TRUE),
+      spearman_rho = mean(spearman_rho, na.rm = TRUE),
+      kendall_tau = mean(kendall_tau, na.rm = TRUE),
+      .groups = "drop"
+    )
+ 
+  list(
+    rank_compare = rank_compare,
+    ranking_metrics = ranking_metrics,
+    ranking_summary = ranking_summary
+  )
+}
+
+
+datasets <- c("Adult", "BankMarketing", "BikeSharing", "GermanCredit")
+ 
+target_types <- c(
+  Adult         = "classification",
+  BankMarketing = "classification",
+  BikeSharing  = "regression",
+  GermanCredit = "classification"
+)
+ 
+all_ranking_real <- purrr::map_dfr(datasets, function(ds) {
+ 
+  reinf_res <- compute_reinforcement_real(
+    dataset_name = ds,
+    target_type  = target_types[[ds]],
+    save_plot    = FALSE
+  )
+ 
+  rank_res <- compute_ranking_real(
+    long_df      = reinf_res$long_data,
+    target_type  = target_types[[ds]]
+  )
+ 
+  rank_res$ranking_summary
+})
+```

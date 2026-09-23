@@ -1,0 +1,282 @@
+---
+title: "Real_data_prediction"
+format: html
+editor: visual
+---
+
+# Packages
+
+```{r}
+# List of required packages
+list_of_packages <- c("MASS", "ggplot2", "dplyr", "caret", "rpart", "tidyr", "here", "glmnet" ,"synthpop", "purrr", "MonteCarlo", "tidyverse", "Matrix", "caret", "bnlearn", "e1071", "kernlab", "data.table", "FNN")
+
+# Function to install a package if it is not already installed
+install_if_missing <- function(p){
+  if(!requireNamespace(p, quietly = TRUE)){
+    install.packages(p)
+  }
+  library(p, character.only=TRUE)
+}
+
+# Install and load packages
+lapply(list_of_packages, install_if_missing)
+```
+
+# Prediction
+
+```{r}
+source("Z:/synthetische_Daten/Same_Model_Type_Influence/Simulation/prediction.R")
+
+run_and_save_predictions <- function(syn_obj, target_var, out_dir = "../data/data") {
+  if (!is.list(syn_obj) || is.data.frame(syn_obj)) {
+    stop("syn_obj must be a list of synthetic datasets.")
+  }
+  if (!dir.exists(out_dir)) {
+    dir.create(out_dir, recursive = TRUE)
+  }
+  # infer dataset name from object name, e.g. Adult_syn_svm -> Adult
+  syn_obj_name <- deparse(substitute(syn_obj))
+  dataset_name <- sub("_syn_.*$", "", syn_obj_name)
+  pred_funs <- list(
+    parm = parm_pred,
+    cart = cart_pred,
+    bn   = bn_pred,
+    svm  = svm_pred
+  )
+  # rename list elements like dataset1_synmc1 -> synmc1
+  old_names <- names(syn_obj)
+  new_names <- sub("^.*?(synmc[0-9]+)$", "\\1", old_names)
+  invalid_names <- is.na(new_names) | !grepl("synmc[0-9]+$", old_names)
+  new_names[invalid_names] <- paste0("synmc", seq_along(syn_obj))[invalid_names]
+  names(syn_obj) <- new_names
+  all_results <- vector("list", length(syn_obj))
+  names(all_results) <- names(syn_obj)
+  for (ds_name in names(syn_obj)) {
+    dat <- syn_obj[[ds_name]]
+    all_results[[ds_name]] <- list()
+    for (pred_name in names(pred_funs)) {
+      fun <- pred_funs[[pred_name]]
+      message("Running prediction for dataset: ", dataset_name,
+              " | seed: ", ds_name,
+              " | method: ", pred_name)
+      res <- tryCatch(
+        fun(dat, target_var = target_var),
+        error = function(e) {
+          message("Error in ", dataset_name, " | ", ds_name,
+                  " | ", pred_name, ": ", e$message)
+          return(NA)
+        }
+      )
+      # object/file name, e.g. Adult_synmc1_bnpred
+      obj_name <- paste0(dataset_name, "_", ds_name, "_", pred_name, "pred")
+      assign(obj_name, res)
+      save(list = obj_name, file = file.path(out_dir, paste0(obj_name, ".RData")))
+      rm(list = obj_name)
+      all_results[[ds_name]][[pred_name]] <- res
+    }
+  }
+  return(all_results)
+}
+```
+
+-   save the preprocessed datasets (original)
+
+-   targets per dataset
+
+-   run each prediction once, specify the target, see how the metric looks for each of the synthesis seeds
+
+-   run prediction once on the original data and 5 times per each synthesis methods (5 synthesis seeds)
+
+## Adult
+
+### On original data
+
+```{r}
+load("Z:/synthetische_Daten/Same_Model_Type_Influence/Simulation/real_data/data/data/Adult.RData")
+
+# parm
+Adult_orig_parm <- parm_pred(Adult, target_var = "income")
+save(Adult_orig_parm, file = "../data/data/Adult_orig_parm.RData")
+# cart
+Adult_orig_cart <- cart_pred(Adult, target_var = "income")
+save(Adult_orig_cart, file = "../data/data/Adult_orig_cart.RData")
+# bn
+Adult_orig_bn <- bn_pred(Adult, target_var = "income")
+save(Adult_orig_bn, file = "../data/data/Adult_orig_bn.RData")
+# svm
+Adult_orig_svm <- svm_pred(Adult, target_var = "income")
+save(Adult_orig_svm, file = "../data/data/Adult_orig_svm.RData")
+
+```
+
+### On parametrically synthesized data
+
+```{r}
+Adult_parmsyn <- get(load("../data/data/Adult_syn_parm.RData"))
+run_and_save_predictions(Adult_parmsyn, "income")
+```
+
+### On CART-synthesized data
+
+```{r}
+Adult_cartsyn <- get(load("../data/data/Adult_syn_cart.RData"))
+run_and_save_predictions(Adult_cartsyn, "income")
+```
+
+### On BN-synthesized data
+
+```{r}
+Adult_bnsyn <- get(load("../data/data/Adult_syn_bn.RData"))
+run_and_save_predictions(Adult_bnsyn, "income")
+```
+
+### On SVM-synthesized data
+
+```{r}
+Adult_svmsyn <- get(load("../data/data/Adult_syn_svm.RData"))
+run_and_save_predictions(Adult_svmsyn, "income")
+```
+
+## Bank and Marketing
+
+### On original data
+
+```{r}
+load("Z:/synthetische_Daten/Same_Model_Type_Influence/Simulation/real_data/data/data/BankMarketing.RData")  
+# parm 
+BankMarketing_orig_parm <- parm_pred(BankMarketing, target_var = "y")
+save(BankMarketing_orig_parm, file = "../data/data/BankMarketing_orig_parm.RData") 
+# cart 
+BankMarketing_orig_cart <- cart_pred(BankMarketing, target_var = "y") 
+save(BankMarketing_orig_cart, file = "../data/data/BankMarketing_orig_cart.RData") 
+# bn 
+BankMarketing_orig_bn <- bn_pred(BankMarketing, target_var = "y") 
+save(BankMarketing_orig_bn, file = "../data/data/BankMarketing_orig_bn.RData") 
+# svm 
+BankMarketing_orig_svm <- svm_pred(BankMarketing, target_var = "y") 
+save(BankMarketing_orig_svm, file = "../data/data/BankMarketing_orig_svm.RData") 
+```
+
+### On parametricly synthesized data
+
+```{r}
+BankMarketing_parmsyn <- get(load("../data/data/BankMarketing_syn_parm.RData"))  
+run_and_save_predictions(BankMarketing_parmsyn, "y")
+```
+
+### On CART-synthesized data
+
+```{r}
+BankMarketing_cartsyn <- get(load("../data/data/BankMarketing_syn_cart.RData"))  
+run_and_save_predictions(BankMarketing_cartsyn, "y")
+```
+
+### On BN-synthesized data
+
+```{r}
+BankMarketing_bnsyn <- get(load("../data/data/BankMarketing_syn_bn.RData"))
+run_and_save_predictions(BankMarketing_bnsyn, "y")
+```
+
+### On SVM-synthesized data
+
+```{r}
+BankMarketing_svmsyn <- get(load("../data/data/BankMarketing_syn_svm.RData"))
+run_and_save_predictions(BankMarketing_svmsyn, "y")
+```
+
+## Bike Sharing
+
+### On original data
+
+```{r}
+load("Z:/synthetische_Daten/Same_Model_Type_Influence/Simulation/real_data/data/data/BikeSharing.RData")  
+# parm 
+BikeSharing_orig_parm <- parm_pred(BikeSharing, target_var = "cnt")
+save(BikeSharing_orig_parm, file = "../data/data/BikeSharing_orig_parm.RData") 
+# cart 
+BikeSharing_orig_cart <- cart_pred(BikeSharing, target_var = "cnt") 
+save(BikeSharing_orig_cart, file = "../data/data/BikeSharing_orig_cart.RData") 
+# bn 
+BikeSharing_orig_bn <- bn_pred(BikeSharing, target_var = "cnt") 
+save(BikeSharing_orig_bn, file = "../data/data/BikeSharing_orig_bn.RData") 
+# svm 
+BikeSharing_orig_svm <- svm_pred(BikeSharing, target_var = "cnt") 
+save(BikeSharing_orig_svm, file = "../data/data/BikeSharing_orig_svm.RData")
+```
+
+### On parametricly synthesized data
+
+```{r}
+BikeSharing_parmsyn <- get(load("../data/data/BikeSharing_syn_parm.RData"))  
+run_and_save_predictions(BikeSharing_parmsyn, "cnt")
+```
+
+### On CART-synthesized data
+
+```{r}
+BikeSharing_cartsyn <- get(load("../data/data/BikeSharing_syn_cart.RData"))  
+run_and_save_predictions(BikeSharing_cartsyn, "cnt")
+```
+
+### On BN-synthesized data
+
+```{r}
+BikeSharing_bnsyn <- get(load("../data/data/BikeSharing_syn_bn.RData"))
+run_and_save_predictions(BikeSharing_bnsyn, "cnt")
+```
+
+### On SVM-synthesized data
+
+```{r}
+BikeSharing_svmsyn <- get(load("../data/data/BikeSharing_syn_svm.RData"))
+run_and_save_predictions(BikeSharing_svmsyn, "cnt")
+```
+
+## German Credit
+
+### On original data
+
+```{r}
+load("Z:/synthetische_Daten/Same_Model_Type_Influence/Simulation/real_data/data/data/GermanCredit.RData")
+# parm  
+GermanCredit_orig_parm <- parm_pred(GermanCredit, target_var = "class") 
+save(GermanCredit_orig_parm, file = "../data/data/GermanCredit_orig_parm.RData")  
+# cart  
+GermanCredit_orig_cart <- cart_pred(GermanCredit, target_var = "class")  
+save(GermanCredit_orig_cart, file = "../data/data/GermanCredit_orig_cart.RData")  
+# bn  
+GermanCredit_orig_bn <- bn_pred(GermanCredit, target_var = "class")  
+save(GermanCredit_orig_bn, file = "../data/data/GermanCredit_orig_bn.RData")  
+# svm  
+GermanCredit_orig_svm <- svm_pred(GermanCredit, target_var = "class")  
+save(GermanCredit_orig_svm, file = "../data/data/GermanCredit_orig_svm.RData")
+```
+
+### On parametricly synthesized data
+
+```{r}
+GermanCredit_parmsyn <- get(load("../data/data/GermanCredit_syn_parm.RData"))  
+run_and_save_predictions(GermanCredit_parmsyn, "class")
+```
+
+### On CART-synthesized data
+
+```{r}
+GermanCredit_cartsyn <- get(load("../data/data/GermanCredit_syn_cart.RData"))  
+run_and_save_predictions(GermanCredit_cartsyn, "class")
+```
+
+### On BN-synthesized data
+
+```{r}
+GermanCredit_bnsyn <- get(load("../data/data/GermanCredit_syn_bn.RData"))
+run_and_save_predictions(GermanCredit_bnsyn, "class")
+```
+
+### On SVM-synthesized data
+
+```{r}
+GermanCredit_svmsyn <- get(load("../data/data/GermanCredit_syn_svm.RData"))
+run_and_save_predictions(GermanCredit_svmsyn, "class")
+```

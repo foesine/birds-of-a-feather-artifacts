@@ -1,0 +1,294 @@
+---
+title: "Real_data_application"
+format: html
+editor: visual
+---
+
+# Packages
+
+```{r}
+# List of required packages
+list_of_packages <- c("MASS", "ggplot2", "dplyr", "caret", "rpart", "tidyr", "here", "glmnet" ,"synthpop", "purrr", "MonteCarlo", "tidyverse", "Matrix", "caret", "bnlearn", "e1071", "kernlab", "data.table", "FNN")
+
+# Function to install a package if it is not already installed
+install_if_missing <- function(p){
+  if(!requireNamespace(p, quietly = TRUE)){
+    install.packages(p)
+  }
+  library(p, character.only=TRUE)
+}
+
+# Install and load packages
+lapply(list_of_packages, install_if_missing)
+```
+
+# Directories
+
+```{r}
+raw_data_dir <- here::here("data", "real_data", "orig")
+processed_data_dir <- here::here("data", "real_data", "data")
+ 
+dir.create(processed_data_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Data
+
+## Adult
+
+```{r}
+Adult <- read.csv(file.path(raw_data_dir, "adult", "adult_preprocessed.csv"))
+
+# set correct classes
+Adult$age            <- as.integer(Adult$age)
+Adult$capital_gain   <- as.integer(Adult$capital_gain)
+Adult$capital_loss   <- as.integer(Adult$capital_loss)
+Adult$hours_per_week <- as.integer(Adult$hours_per_week)
+Adult$workclass      <- as.factor(Adult$workclass)
+Adult$education      <- as.factor(Adult$education)
+Adult$marital_status <- as.factor(Adult$marital_status)
+Adult$occupation     <- as.factor(Adult$occupation)
+Adult$relationship   <- as.factor(Adult$relationship)
+Adult$race           <- as.factor(Adult$race)
+Adult$sex            <- as.factor(Adult$sex)
+Adult$native_country <- as.factor(Adult$native_country)
+Adult$income         <- as.factor(Adult$income)
+ 
+# drop fnlwgt
+Adult$fnlwgt <- NULL
+
+save(Adult, file = file.path(processed_data_dir, "Adult.RData"))
+```
+
+## Bank and Marketing
+
+```{r}
+BankMarketing <- read.csv2(file.path(raw_data_dir, "bank+marketing", "bank", "bank.csv"))
+
+BankMarketing$age      <- as.integer(BankMarketing$age)
+BankMarketing$balance  <- as.integer(BankMarketing$balance)
+BankMarketing$day      <- as.integer(BankMarketing$day)
+BankMarketing$campaign <- as.integer(BankMarketing$campaign)
+BankMarketing$pdays    <- as.integer(BankMarketing$pdays)
+BankMarketing$previous <- as.integer(BankMarketing$previous)
+BankMarketing$duration <- as.integer(BankMarketing$duration) #usually not suitable for ex-ante prediction because unknown
+ 
+BankMarketing$job       <- as.factor(BankMarketing$job)
+BankMarketing$marital   <- as.factor(BankMarketing$marital)
+BankMarketing$education <- as.factor(BankMarketing$education)
+BankMarketing$default   <- as.factor(BankMarketing$default)
+BankMarketing$housing   <- as.factor(BankMarketing$housing)
+BankMarketing$loan      <- as.factor(BankMarketing$loan)
+BankMarketing$contact   <- as.factor(BankMarketing$contact)
+BankMarketing$month     <- as.factor(BankMarketing$month)
+BankMarketing$poutcome  <- as.factor(BankMarketing$poutcome)
+BankMarketing$y         <- as.factor(BankMarketing$y)
+
+
+save(BankMarketing, file = file.path(processed_data_dir, "BankMarketing.RData"))
+```
+
+## Bike Sharing
+
+```{r}
+BikeSharing <- read.csv(file.path(raw_data_dir, "bike+sharing+dataset", "hour.csv"))
+
+# convert date and derive day-of-month
+BikeSharing$dteday<-as.Date(BikeSharing$dteday)
+BikeSharing$day<-as.integer(format(BikeSharing$dteday, "%d"))
+BikeSharing$dteday<-NULL
+
+# set correct classes
+BikeSharing$instant<-as.integer(BikeSharing$instant)
+BikeSharing$temp<-as.numeric(BikeSharing$temp)
+BikeSharing$atemp<-as.numeric(BikeSharing$atemp)
+BikeSharing$hum<-as.numeric(BikeSharing$hum)
+BikeSharing$windspeed<-as.numeric(BikeSharing$windspeed)
+BikeSharing$casual<-as.integer(BikeSharing$casual)
+BikeSharing$registered<-as.integer(BikeSharing$registered)
+BikeSharing$cnt<-as.integer(BikeSharing$cnt)
+BikeSharing$season<-as.factor(BikeSharing$season)
+BikeSharing$yr<-as.factor(BikeSharing$yr)
+BikeSharing$mnth<-as.factor(BikeSharing$mnth)
+BikeSharing$hr<-as.factor(BikeSharing$hr)
+BikeSharing$holiday<-as.factor(BikeSharing$holiday)
+BikeSharing$weekday<-as.factor(BikeSharing$weekday)
+BikeSharing$workingday<-as.factor(BikeSharing$workingday)
+BikeSharing$weathersit<-as.factor(BikeSharing$weathersit)
+
+save(BikeSharing, file = file.path(processed_data_dir, "BikeSharing.RData"))
+```
+
+## German Credit
+
+```{r}
+GermanCredit <- data.table::setDT(read.table(file.path(raw_data_dir, "statlog+german+credit+data", "german.data")))
+
+# Rename columns
+setnames(
+  GermanCredit,
+  old = names(GermanCredit),
+  new = c(
+    "checking_status",         # Attribute 1
+    "duration_months",         # Attribute 2
+    "credit_history",          # Attribute 3
+    "purpose",                 # Attribute 4
+    "credit_amount",           # Attribute 5
+    "savings",                 # Attribute 6
+    "employment_duration",     # Attribute 7
+    "installment_rate",        # Attribute 8
+    "personal_status_sex",     # Attribute 9
+    "other_debtors",           # Attribute 10
+    "present_residence",       # Attribute 11
+    "property",                # Attribute 12
+    "age",                     # Attribute 13
+    "other_installment_plans", # Attribute 14
+    "housing",                 # Attribute 15
+    "existing_credits",        # Attribute 16
+    "job",                     # Attribute 17
+    "liable_people",           # Attribute 18
+    "telephone",               # Attribute 19
+    "foreign_worker",          # Attribute 20
+    "class"                    # Target
+  )
+)
+ 
+# Recode categorical variables using the UCI documentation
+recode_factor <- function(x, mapping) {
+  factor(unname(mapping[as.character(x)]), levels = unique(unname(mapping)))
+}
+ 
+GermanCredit[, checking_status := recode_factor(checking_status, c(
+  A11 = "< 0 DM",
+  A12 = "0 to < 200 DM",
+  A13 = ">= 200 DM / salary assignments >= 1 year",
+  A14 = "no checking account"
+))]
+ 
+GermanCredit[, credit_history := recode_factor(credit_history, c(
+  A30 = "no credits taken / all credits paid back duly",
+  A31 = "all credits at this bank paid back duly",
+  A32 = "existing credits paid back duly till now",
+  A33 = "delay in paying off in the past",
+  A34 = "critical account / other credits existing"
+))]
+ 
+GermanCredit[, purpose := recode_factor(purpose, c(
+  A40  = "car (new)",
+  A41  = "car (used)",
+  A42  = "furniture/equipment",
+  A43  = "radio/television",
+  A44  = "domestic appliances",
+  A45  = "repairs",
+  A46  = "education",
+  A47  = "vacation",
+  A48  = "retraining",
+  A49  = "business",
+  A410 = "others"
+))]
+ 
+GermanCredit[, savings := recode_factor(savings, c(
+  A61 = "< 100 DM",
+  A62 = "100 to < 500 DM",
+  A63 = "500 to < 1000 DM",
+  A64 = ">= 1000 DM",
+  A65 = "unknown / no savings account"
+))]
+ 
+GermanCredit[, employment_duration := recode_factor(employment_duration, c(
+  A71 = "unemployed",
+  A72 = "< 1 year",
+  A73 = "1 to < 4 years",
+  A74 = "4 to < 7 years",
+  A75 = ">= 7 years"
+))]
+ 
+GermanCredit[, personal_status_sex := recode_factor(personal_status_sex, c(
+  A91 = "male divorced/separated",
+  A92 = "female divorced/separated/married",
+  A93 = "male single",
+  A94 = "male married/widowed",
+  A95 = "female single"
+))]
+ 
+GermanCredit[, other_debtors := recode_factor(other_debtors, c(
+  A101 = "none",
+  A102 = "co-applicant",
+  A103 = "guarantor"
+))]
+ 
+GermanCredit[, property := recode_factor(property, c(
+  A121 = "real estate",
+  A122 = "building society savings / life insurance",
+  A123 = "car or other",
+  A124 = "unknown / no property"
+))]
+ 
+GermanCredit[, other_installment_plans := recode_factor(other_installment_plans, c(
+  A141 = "bank",
+  A142 = "stores",
+  A143 = "none"
+))]
+ 
+GermanCredit[, housing := recode_factor(housing, c(
+  A151 = "rent",
+  A152 = "own",
+  A153 = "for free"
+))]
+ 
+GermanCredit[, job := recode_factor(job, c(
+  A171 = "unemployed / unskilled non-resident",
+  A172 = "unskilled resident",
+  A173 = "skilled employee / official",
+  A174 = "management / self-employed / highly qualified"
+))]
+ 
+GermanCredit[, telephone := recode_factor(telephone, c(
+  A191 = "none",
+  A192 = "yes"
+))]
+ 
+GermanCredit[, foreign_worker := recode_factor(foreign_worker, c(
+  A201 = "yes",
+  A202 = "no"
+))]
+ 
+# Recode target
+GermanCredit[, class := factor(class, levels = c(1, 2), labels = c("good", "bad"))]
+
+# use DataFrame for the function
+GermanCredit <- as.data.frame(GermanCredit)
+
+save(GermanCredit, file = file.path(processed_data_dir, "GermanCredit.RData"))
+```
+
+# Synthesis
+
+```{r}
+# code for simulation including model families
+source(here::here("code", "synthesis_real_data.R"))
+```
+
+## Adult
+
+```{r}
+run_all_synthesis(Adult)
+```
+
+## Bank and Marketing
+
+```{r}
+run_all_synthesis(BankMarketing)
+```
+
+## Bike Sharing
+
+```{r}
+run_all_synthesis(BikeSharing)
+
+```
+
+## German Credit
+
+```{r}
+run_all_synthesis(GermanCredit)
+```

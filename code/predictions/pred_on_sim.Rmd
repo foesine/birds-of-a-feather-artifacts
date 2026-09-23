@@ -1,0 +1,193 @@
+---
+title: "pred_on_sim"
+output: html_document
+date: "2026-09-21"
+---
+ 
+# Packages
+ 
+```{r}
+list_of_packages <- c(
+  "MASS", "ggplot2", "dplyr", "caret", "rpart", "tidyr", "here",
+  "glmnet", "synthpop", "purrr", "MonteCarlo", "tidyverse", "Matrix",
+  "e1071", "bnlearn", "future", "furrr", "kernlab")
+ 
+install_if_missing <- function(p) {
+  if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+  library(p, character.only = TRUE)
+}
+ 
+invisible(lapply(unique(list_of_packages), install_if_missing))
+```
+ 
+# Load data
+ 
+```{r}
+sim_hierarchical <- readRDS(here::here("data", "sim_hierarchical.rds"))
+sim_linear <- readRDS(here::here("data", "sim_linear.rds"))
+ 
+cat("Hierarchical simulation datasets:", length(sim_hierarchical), "\n")
+cat("Linear simulation datasets:", length(sim_linear), "\n")
+```
+ 
+# Load functions
+ 
+```{r}
+source(here::here("code", "prediction.R"))
+```
+ 
+# Settings
+ 
+```{r}
+workers <- 8
+ 
+# Predictor restrictions
+restrict_hier <- FALSE
+restrict_linear <- TRUE
+ 
+# Expected number of original datasets:
+# 3 p-values x 5 simulation replications = 15
+expected_n <- 3 * 5
+ 
+if (length(sim_hierarchical) != expected_n) {
+  warning(
+    "sim_hierarchical contains ", length(sim_hierarchical),
+    " datasets; expected ", expected_n, ".")
+}
+ 
+if (length(sim_linear) != expected_n) {
+  warning(
+    "sim_linear contains ", length(sim_linear),
+    " datasets; expected ", expected_n, ".")
+}
+```
+ 
+# Apply predictions
+ 
+## Parametric prediction
+ 
+### Hierarchical simulation
+ 
+```{r}
+parmpred_hiersim <- run_prediction_grid(
+  data_object = sim_hierarchical,
+  prediction_function = parm_pred,
+  output_file = "parmpred_hiersim",
+  restrict_predictors = restrict_hier,
+  workers = workers)
+```
+ 
+### Linear simulation
+ 
+```{r}
+parmpred_linsim <- run_prediction_grid(
+  data_object = sim_linear,
+  prediction_function = parm_pred,
+  output_file = "parmpred_linsim",
+  restrict_predictors = restrict_linear,
+  workers = workers)
+```
+ 
+## CART prediction
+ 
+### Hierarchical simulation
+ 
+```{r}
+cartpred_hiersim <- run_prediction_grid(
+  data_object = sim_hierarchical,
+  prediction_function = cart_pred,
+  output_file = "cartpred_hiersim",
+  restrict_predictors = restrict_hier,
+  workers = workers)
+```
+ 
+### Linear simulation
+ 
+```{r}
+cartpred_linsim <- run_prediction_grid(
+  data_object = sim_linear,
+  prediction_function = cart_pred,
+  output_file = "cartpred_linsim",
+  restrict_predictors = restrict_linear,
+  workers = workers)
+```
+ 
+## Bayesian Network prediction
+ 
+### Hierarchical simulation
+ 
+```{r}
+bnpred_hiersim <- run_prediction_grid(
+  data_object = sim_hierarchical,
+  prediction_function = bn_pred,
+  output_file = "bnpred_hiersim",
+  restrict_predictors = restrict_hier,
+  workers = workers)
+```
+ 
+### Linear simulation
+ 
+```{r}
+bnpred_linsim <- run_prediction_grid(
+  data_object = sim_linear,
+  prediction_function = bn_pred,
+  output_file = "bnpred_linsim",
+  restrict_predictors = restrict_linear,
+  workers = workers)
+```
+ 
+## SVM prediction
+ 
+### Hierarchical simulation
+ 
+```{r}
+svmpred_hiersim <- run_prediction_grid(
+  data_object = sim_hierarchical,
+  prediction_function = svm_pred,
+  output_file = "svmpred_hiersim",
+  restrict_predictors = restrict_hier,
+  workers = workers)
+```
+ 
+### Linear simulation
+ 
+```{r}
+svmpred_linsim <- run_prediction_grid(
+  data_object = sim_linear,
+  prediction_function = svm_pred,
+  output_file = "svmpred_linsim",
+  restrict_predictors = restrict_linear,
+  workers = workers)
+```
+ 
+# Validate outputs
+ 
+```{r}
+prediction_objects <- c(
+  "parmpred_hiersim", "parmpred_linsim",
+  "cartpred_hiersim", "cartpred_linsim",
+  "bnpred_hiersim", "bnpred_linsim",
+  "svmpred_hiersim", "svmpred_linsim")
+ 
+for (obj in prediction_objects) {
+  if (!exists(obj)) {
+    warning(obj, " does not exist.")
+    next
+  }
+ 
+  x <- get(obj)
+  if (length(x) != expected_n) {
+    warning(
+      obj, " contains ", length(x),
+      " results; expected ", expected_n, ".")
+  } else {
+    cat(obj, ":", length(x), "results -- OK\n")
+  }
+}
+```
+ 
+# Reset parallel backend
+ 
+```{r}
+future::plan(future::sequential)
+```

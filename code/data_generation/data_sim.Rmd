@@ -1,0 +1,67 @@
+---
+title: "Cat_Data_Sim"
+output: html_document
+date: "2025-04-24"
+---
+
+## Packages
+
+```{r}
+# List of required packages
+list_of_packages <- c("MASS", "ggplot2", "dplyr", "caret", "rpart", "tidyr", "glmnet" ,"synthpop", "purrr", "MonteCarlo", "tidyverse", "Matrix", "caret", "bnlearn", "stringr", "future", "furrr", "parallelly")
+
+# Function to install a package if it is not already installed
+install_if_missing <- function(p){
+  if(!requireNamespace(p, quietly = TRUE)){
+    install.packages(p)
+  }
+  library(p, character.only=TRUE)
+}
+
+# Install and load packages
+lapply(list_of_packages, install_if_missing)
+```
+
+# Simulation fcts
+```{r}
+source(here::here("code", "simulation.R"))
+```
+
+
+```{r}
+# list of datasets for p = 6, 12, 18 and seeds = 1:5
+params <- c(6, 12, 18)
+sim_hierarchical <- list()
+sim_linear <- list()
+ 
+for (p in params) {
+  for (seed in 1:5) {
+    name <- paste0("p", p, "_mc", seed)
+    sim_hierarchical[[name]] <- generate_data_hierarchical(
+      N            = 10000,
+      a            = 0,
+      b            = 10,
+      p            = p,
+      seed         = seed,
+      return_trees = FALSE
+    )$data
+    
+    sim_linear[[name]] <- generate_data_linear(
+      n = 10000,
+      p = p,
+      min_obs = 20,
+      max_levels = 7,
+      seed = seed
+    )
+  }
+}
+ 
+# Inspect the names and structure
+#names(sim_hierarchical)
+#str(sim_hierarchical)
+#names(sim_linear)
+#str(sim_linear)
+
+saveRDS(sim_hierarchical, file = here::here("data", "sim_hierarchical.rds"))
+saveRDS(sim_linear, file = here::here("data", "sim_linear.rds"))
+```

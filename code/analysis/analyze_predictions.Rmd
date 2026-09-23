@@ -1,0 +1,387 @@
+---
+title: "analyze_predictions"
+output: html_document
+date: "2025-05-08"
+---
+# Packages
+```{r, message=FALSE, warning=TRUE, error=TRUE}
+# List of required packages
+list_of_packages <- c("MASS", "ggplot2", "dplyr", "caret", "rpart", "tidyr", "here", "glmnet" ,"synthpop", "purrr", "MonteCarlo", "tidyverse", "Matrix", "caret", "e1071", "stringr", "tidyr", "bnlearn", "tibble")
+
+# Function to install a package if it is not already installed
+install_if_missing <- function(p){
+  if(!requireNamespace(p, quietly = TRUE)){
+    install.packages(p)
+  }
+  library(p, character.only=TRUE)
+}
+# Install and load packages
+lapply(list_of_packages, install_if_missing)
+```
+
+# Directories
+```{r}
+data_dir <- here::here("data")
+figure_dir <- here::here("results", "figures")
+table_dir <- here::here("results", "additional_materials")
+ 
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# check data structures
+```{r}
+# Define the models you expect
+prediction_models <- c("bnpred", "cartpred", "svmpred", "parmpred")
+synthesis_models  <- c("hiersim", "linsim",         # simulated data
+                       "cartlinsyn", "carthiersyn", # CART synthetic
+                       "svmlinsyn",  "svmhiersyn",  # SVM synthetic
+                       "parmlinsyn","parmhiersyn",  # parametric synthetic
+                       "bnlinsyn", "bnhiersyn")     # bn synthetic
+ 
+# find all .RData results files
+files <- list.files(path = data_dir, pattern = "\\.RData$", full.names = TRUE)
+ 
+# build the exact names we care about
+expected_names <- as.vector(outer(prediction_models, synthesis_models, paste, sep = "_"))
+expected_files <- paste0(expected_names, ".RData")
+ 
+# report any missing expected files
+for (ef in expected_files) {
+  if (!ef %in% basename(files)) {
+    cat("Missing file:", ef, "\n")
+  }
+}
+ 
+# only keep the files that match our expected patterns
+files <- files[basename(files) %in% expected_files]
+ 
+all_results <- purrr::map_dfr(files, function(file_path) {
+  fname <- basename(file_path)
+  name <- stringr::str_remove(fname, "\\.RData$")
+  parts <- stringr::str_split(name, "_", simplify = TRUE)
+  pred_model <- parts[1]
+  synth_model <- parts[2]
+ 
+  tmp <- new.env()
+  load(file_path, envir = tmp)
+  obj_name <- ls(tmp)[1]
+  res_list <- tmp[[obj_name]]
+ 
+  purrr::map_dfr(names(res_list), function(param_name) {
+    param_list <- res_list[[param_name]]
+ 
+    if (!is.list(param_list)) {
+      warning("Skipping non-list element ", param_name, " in ", fname)
+      return(NULL)
+    }
+ 
+    purrr::map_dfr(names(param_list), function(target) {
+      df <- param_list[[target]]
+ 
+      if (!is.data.frame(df)) {
+        warning("Skipping non-data.frame target ", target,
+                " in param ", param_name, " of ", fname)
+        return(NULL)
+      }
+ 
+      dplyr::mutate(
+        df,
+        Prediction_Model = pred_model,
+        Synthesis_Model = synth_model,
+        Parameter_Set = param_name,
+        Target = target,
+        .before = dplyr::everything()
+      )
+    })
+  })
+})
+ 
+combined_long <- all_results |>
+  dplyr::select(-Sensitivity) |>
+  tidyr::pivot_longer(
+    cols = c(Accuracy, Specificity, F1, MAE, RMSE, R_squared),
+    names_to = "Metric",
+    values_to = "Value",
+    values_drop_na = TRUE)
+```
+ 
+```{r}
+# combined_results has columns:
+# Prediction_Model, Synthesis_Model, Target, Accuracy, Sensitivity, Specificity
+ 
+combined_filtered <- combined_results %>%
+  # drop any missing accuracies
+  filter(!is.na(Accuracy)) %>%
+  # derive Data_Type from your synthesis model name
+  mutate(
+    Data_Type = ifelse(str_detect(Synthesis_Model, "hier"), 
+                       "hierarchical", 
+                       "linear"),
+    # tag continuous vs categorical by the Target prefix
+    TargetType = ifelse(str_starts(Target, "X"),
+                        "Continuous", 
+                        "Categorical")
+  )
+```
+
+```{r}
+# Pivot long and tag types
+combined_long <- combined_results %>%
+  pivot_longer(
+    cols      = c(MAE, RMSE, R_squared, Accuracy, F1, Specificity),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  filter(!is.na(Value)) %>%
+  mutate(
+    TargetType = ifelse(str_starts(Target, "X"), "Continuous", "Categorical"),
+    Data_Type  = ifelse(str_detect(Synthesis_Model, "hier"), "hierarchical", "linear")
+  )
+ 
+# Split into the two Metric‐TargetType combos
+df_cont <- combined_long %>%
+  filter(TargetType == "Continuous", Metric == "RMSE")
+ 
+df_cat  <- combined_long %>%
+  filter(TargetType == "Categorical", Metric == "Accuracy")
+save(combined_long, file = file.path(data_dir, "combined_long.RData"))
+readr::write_csv(combined_long, file = file.path(table_dir, "prediction_results.csv"))
+```
+ 
+```{r fig.show='hold', warning=FALSE, message=FALSE}
+ 
+# fixed colors for Prediction_Model (make sure these match your values)
+pred_colors <- c(
+  cartpred = "#82c074",
+  bnpred   = "#54bdbf",
+  parmpred = "#e9496a",
+  svmpred  = "#ed9656"
+)
+ 
+# metrics to plot
+cont_metrics <- c("MAE", "RMSE", "R_squared")
+cat_metrics  <- c("Accuracy", "F1", "Specificity")
+ 
+# helpers for pretty labels
+metric_title  <- function(m) if (m == "R_squared") "R\u00B2" else m         # title uses R²
+metric_ylabel <- function(m) if (m == "R_squared") expression(R^2) else m    # y-axis uses R²
+dtype_title   <- function(d) if (tolower(d) == "linear") "parametric" else "hierarchical"
+ 
+# map synthesis model names to unified tick labels
+syn_labeller <- function(v) {
+  dplyr::recode(v,
+    bnlinsyn    = "BN Syn.",
+    bnhiersyn   = "BN Syn.",
+    parmlinsyn  = "Parametric Syn.",
+    parmhiersyn = "Parametric Syn.",
+    cartlinsyn  = "CART Syn.",
+    carthiersyn = "CART Syn.",
+    svmlinsyn   = "SVM Syn.",
+    svmhiersyn  = "SVM Syn.",
+    hiersim     = "Simulated Data",
+    linsim      = "Simulated Data",
+    .default    = v
+  )
+}
+ 
+# canonical order so Simulated Data comes first if present
+x_order_canonical <- c(
+  "hiersim", "linsim",
+  "carthiersyn", "cartlinsyn",
+  "parmhiersyn", "parmlinsyn",
+  "svmhiersyn", "svmlinsyn",
+  "bnhiersyn", "bnlinsyn"
+)
+ 
+# which plots keep the legend?
+keep_legend_for <- c("R_squared", "Sensitivity")
+ 
+# derive y-axis limits from the boxplot layer
+boxplot_y_limits <- function(plot, padding = 0.05,
+                             include_outliers = TRUE) {
+  box_data <- ggplot_build(plot)$data[[1]]
+  y_values <- c(box_data$ymin, box_data$ymax)
+  if (include_outliers && "outliers" %in% names(box_data)) {
+    y_values <- c(y_values, unlist(box_data$outliers, use.names = FALSE))
+  }
+  y_values <- y_values[is.finite(y_values)]
+  if (length(y_values) == 0) return(NULL)
+  limits <- range(y_values)
+  y_span <- diff(limits)
+  if (y_span == 0) y_span <- max(abs(limits), 1)
+  limits + c(-1, 1) * padding * y_span
+}
+ 
+# Loop over data types
+for (dtype in unique(combined_long$Data_Type)) {
+ 
+  dtype_label <- dtype_title(dtype)
+ 
+  ### Continuous targets ###
+  for (metric in cont_metrics) {
+ 
+    dfm <- combined_long %>%
+      filter(
+        Data_Type  == dtype,
+        TargetType == "Continuous",
+        Metric     == metric
+      )
+    if (nrow(dfm) == 0) next
+ 
+    # enforce ordering: simulated data first (if present), then others in fixed order
+    present_levels <- intersect(x_order_canonical, unique(dfm$Synthesis_Model))
+    dfm <- dfm %>%
+      mutate(Synthesis_Model = factor(Synthesis_Model, levels = present_levels))
+ 
+    p <- ggplot(dfm, aes(
+      x    = Synthesis_Model,
+      y    = Value,
+      fill = Prediction_Model
+    )) +
+      geom_boxplot(
+        outlier.shape = 1,
+        outlier.size = 0.8,
+        alpha         = 1,
+        position      = position_dodge(width = 0.8)
+      ) +
+      scale_fill_manual(
+        values = pred_colors,
+        labels = c(
+          cartpred = "CART",
+          bnpred   = "BN",
+          parmpred = "Parametric",
+          svmpred  = "SVM"
+        ),
+        drop = FALSE
+      ) +
+      scale_x_discrete(labels = syn_labeller) +
+      labs(
+        title = NULL, #paste(metric_title(metric), "for Continuous Targets —", dtype_label)
+        x     = "Synthesis Model",
+        y     = metric_ylabel(metric),
+        fill  = "Prediction Model"
+      ) +
+      theme_minimal(base_size = 13) +
+      theme(
+        plot.title  = element_text(face = "bold", hjust = 0.5),
+        axis.text.x = element_text(angle = 30, hjust = 1)
+      )
+ 
+    # show the complete boxplot using data-driven limits
+    y_limits <- boxplot_y_limits(p, padding = 0.05,
+                                 include_outliers = TRUE)
+    if (!is.null(y_limits)) {
+      p <- p + coord_cartesian(ylim = y_limits)
+    }
+    
+    # save & print
+    fname <- file.path(figure_dir, paste0(
+      gsub("[^A-Za-z0-9]+", "_", paste(metric_title(metric), "for Continuous Targets —", dtype_label)),".png"))
+    
+    ggsave(fname, plot = p, width = 8, height = 6)
+    print(p)
+  }
+ 
+  ### Categorical targets ###
+  for (metric in cat_metrics) {
+ 
+    dfm <- combined_long %>%
+      filter(
+        Data_Type  == dtype,
+        TargetType == "Categorical",
+        Metric     == metric
+      )
+    if (nrow(dfm) == 0) next
+ 
+    present_levels <- intersect(x_order_canonical, unique(dfm$Synthesis_Model))
+    dfm <- dfm %>%
+      mutate(Synthesis_Model = factor(Synthesis_Model, levels = present_levels))
+ 
+    p <- ggplot(dfm, aes(
+      x    = Synthesis_Model,
+      y    = Value,
+      fill = Prediction_Model
+    )) +
+      geom_boxplot(
+        outlier.shape = 1,
+        outlier.size = 0.8,
+        alpha         = 1,
+        position      = position_dodge(width = 0.8)
+      ) +
+      scale_fill_manual(
+        values = pred_colors,
+        labels = c(
+          cartpred = "CART",
+          bnpred   = "BN",
+          parmpred = "Parametric",
+          svmpred  = "SVM"
+        ),
+        drop = FALSE
+      ) +
+      scale_x_discrete(labels = syn_labeller) +
+      labs(
+        title = NULL, #paste(metric, "for Categorical Targets —", dtype_label)
+        x     = "Synthesis Model",
+        y     = metric,
+        fill  = "Prediction Model"
+      ) +
+      theme_minimal(base_size = 13) +
+      theme(
+        plot.title  = element_text(face = "bold", hjust = 0.5),
+        axis.text.x = element_text(angle = 30, hjust = 1)
+      )
+ 
+    # caps for specificity variants
+    if (tolower(dtype) == "hierarchical" && metric == "Specificity") {
+      p <- p + coord_cartesian(ylim = c(0.5, 1))
+    } else if (tolower(dtype) == "linear" && metric == "Specificity") {
+      p <- p + coord_cartesian(ylim = c(0.72, 1))
+    }
+    
+    fname <- file.path(figure_dir, paste0(
+      gsub("[^A-Za-z0-9]+", "_", paste(metric_title(metric), "for Categorical Targets —", dtype_label)),".png"))
+    
+    ggsave(fname, plot = p, width = 8, height = 6)
+    print(p)
+  }
+}
+ 
+```
+
+```{r}
+syn_labeller <- function(v) {
+  dplyr::recode(v,
+    bnlinsyn    = "BN Syn.",
+    bnhiersyn   = "BN Syn.",
+    parmlinsyn  = "Parametric Syn.",
+    parmhiersyn = "Parametric Syn.",
+    cartlinsyn  = "CART Syn.",
+    carthiersyn = "CART Syn.",
+    svmlinsyn   = "SVM Syn.",
+    svmhiersyn  = "SVM Syn.",
+    hiersim     = "Simulated Data",
+    linsim      = "Simulated Data",
+    .default    = v
+  )
+}
+ 
+# Medians for everything used in the plots
+medians_all <- combined_long %>%
+  group_by(Data_Type, TargetType, Synthesis_Model, Metric, Prediction_Model) %>%
+  summarise(
+    Median = median(Value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Synthesis_Label = syn_labeller(Synthesis_Model)) %>%
+  dplyr::select(-Synthesis_Model)   # drop raw model name
+ 
+# order columns
+medians_all <- medians_all %>%
+  relocate(Data_Type, TargetType, Synthesis_Label,
+           Metric, Prediction_Model, Median)
+ 
+# Save full medians table (for reproducible reporting) ---
+write.csv(medians_all, file = file.path(table_dir, "medians_all_for_plots.csv"), row.names = FALSE)
+medians_all
+```

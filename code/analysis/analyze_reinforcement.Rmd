@@ -1,0 +1,1102 @@
+---
+title: "Reinforcement analysis"
+date: "`r Sys.Date()`"
+---
+
+This document evaluates whether synthetic data systematically improve the
+relative position of prediction models from the same family as the synthesis
+model. All comparisons are made against the corresponding prediction-model
+performance on the original data.
+
+The analysis has three complementary parts:
+
+1. the original same-family reinforcement ratio;
+2. the full synthesis-family by prediction-family matrix; and
+3. a diagonal contrast testing whether matching prediction models improve more
+   than nonmatching prediction models.
+
+# Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+packages <- c(
+  "dplyr", "tidyr", "purrr", "stringr", "ggplot2", "readr",
+  "tibble", "here")
+missing_packages <- packages[!vapply(packages, requireNamespace, logical(1),
+                                     quietly = TRUE)]
+if (length(missing_packages) > 0) {
+  stop("Install the following packages first: ",
+       paste(missing_packages, collapse = ", "))
+}
+invisible(lapply(packages, library, character.only = TRUE))
+
+# Configuration for sequential execution in RStudio.
+data_file <- file.path(data_dir, "combined_long.RData")
+bootstrap_reps <- 4999L
+permutation_reps <- 4999L
+random_seed <- 1234L
+set.seed(random_seed)
+
+data_dir <- here::here("data")
+figure_dir <- here::here("results", "figures")
+table_dir <- here::here("results", "additional_materials")
+ 
+dir.create(data_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+## Load the combined results
+
+```{r load-data}
+data_path <- if (file.exists(data_file)) {
+  normalizePath(data_file)
+} else {
+  here::here(data_file)
+}
+if (!file.exists(data_path)) stop("Data file not found: ", data_path)
+
+data_environment <- new.env(parent = emptyenv())
+loaded_objects <- load(data_path, envir = data_environment)
+if (!"combined_long" %in% loaded_objects) {
+  stop("The input file must contain an object named 'combined_long'.")
+}
+combined_long <- get("combined_long", envir = data_environment)
+rm(data_environment)
+
+required_columns <- c(
+  "Parameter_Set", "Target", "Metric", "Value",
+  "Synthesis_Model", "Prediction_Model")
+missing_columns <- setdiff(required_columns, names(combined_long))
+if (length(missing_columns) > 0) {
+  stop("Missing required columns: ", paste(missing_columns, collapse = ", "))
+}
+if (!"TargetType" %in% names(combined_long)) combined_long$TargetType <- NA_character_
+if (!"Data_Type" %in% names(combined_long)) combined_long$Data_Type <- NA_character_
+```
+
+# Definitions and helper functions
+
+```{r definitions}
+higher_better <- c("Accuracy", "F1", "Specificity", "R_squared")
+lower_better <- c("RMSE", "MAE")
+valid_metrics <- c(higher_better, lower_better)
+continuous_metrics <- c("R_squared", "RMSE", "MAE")
+categorical_metrics <- c("Accuracy", "F1", "Specificity")
+
+family_order <- c("parm", "cart", "svm", "bn")
+family_labels <- c(
+  parm = "Parametric", cart = "CART", svm = "SVM", bn = "BN")
+family_palette <- c(
+  parm = "#E9496A", cart = "#82C074", svm = "#ED9656", bn = "#54BDBF")
+data_type_labels <- c(
+  hierarchical = "Hierarchical simulation",
+  parametric = "Parametric simulation")
+metric_labels <- c(
+  R_squared = expression(R^2), RMSE = "RMSE", MAE = "MAE",
+  Accuracy = "Accuracy", F1 = "F1", Specificity = "Specificity")
+
+targets_by_p <- list(
+  `6` = c("X1", "X2", "X3", "C1", "C2", "C3"),
+  `12` = c("X2", "X4", "X6", "C2", "C4", "C6"),
+  `18` = c("X3", "X6", "X9", "C3", "C6", "C9"))
+
+extract_index <- function(x, prefix) {
+  # This intentionally reproduces the extraction used in the original script.
+  pattern <- paste0(prefix, "(\\d+)")
+  suppressWarnings(as.integer(stringr::str_match(x, pattern)[, 2]))
+}
+
+family_from_model <- function(x) {
+  dplyr::case_when(
+    stringr::str_detect(x, "^parm") ~ "parm",
+    stringr::str_detect(x, "^cart") ~ "cart",
+    stringr::str_detect(x, "^svm") ~ "svm",
+    stringr::str_detect(x, "^bn") ~ "bn",
+    TRUE ~ NA_character_)
+}
+
+is_selected_target <- function(p, target) {
+  purrr::map2_lgl(p, target, function(p_i, target_i) {
+    target_i %in% targets_by_p[[as.character(p_i)]]
+  })
+}
+
+relativize <- function(data) {
+  data %>%
+    # Keep these groups identical to the original analysis. In particular,
+    # Parameter_Set distinguishes the original and synthetic datasets.
+    group_by(Data_Type, Synthesis_Model, Parameter_Set, Target, Metric) %>%
+    mutate(
+      best_val = case_when(
+        Metric %in% higher_better ~ max(Value, na.rm = TRUE),
+        Metric %in% lower_better ~ min(Value, na.rm = TRUE),
+        TRUE ~ NA_real_
+      ),
+      rel = case_when(
+        Metric %in% c("Accuracy", "F1", "Specificity") & best_val > 0 ~
+          Value / best_val,
+        Metric %in% c("Accuracy", "F1", "Specificity") & best_val == 0 ~ 1,
+        Metric == "R_squared" & 1 - best_val > .Machine$double.eps ~
+          (1 - best_val) / (1 - Value),
+        Metric == "R_squared" & abs(1 - best_val) <= .Machine$double.eps &
+          abs(Value - best_val) <= .Machine$double.eps ~ 1,
+        Metric == "R_squared" & abs(1 - best_val) <= .Machine$double.eps ~ 0,
+        Metric %in% lower_better & best_val > 0 ~ best_val / Value,
+        Metric %in% lower_better & best_val == 0 & Value == 0 ~ 1,
+        Metric %in% lower_better & best_val == 0 ~ 0,
+        TRUE ~ NA_real_)
+    ) %>%
+    ungroup()
+}
+
+bootstrap_mean_summary <- function(x, reps = bootstrap_reps,
+                                   seed = random_seed) {
+  x <- x[is.finite(x)]
+  n <- length(x)
+  if (n == 0) {
+    return(tibble(
+      n_clusters = 0L, estimate = NA_real_, std_error = NA_real_,
+      conf_low = NA_real_, conf_high = NA_real_, p_boot = NA_real_))
+  }
+  if (n == 1) {
+    return(tibble(
+      n_clusters = 1L, estimate = x, std_error = NA_real_,
+      conf_low = NA_real_, conf_high = NA_real_, p_boot = NA_real_))
+  }
+
+  set.seed(seed)
+  boot_means <- replicate(reps, mean(sample(x, n, replace = TRUE)))
+  p_lower <- (sum(boot_means <= 0) + 1) / (reps + 1)
+  p_upper <- (sum(boot_means >= 0) + 1) / (reps + 1)
+  tibble(
+    n_clusters = n,
+    estimate = mean(x),
+    std_error = sd(boot_means),
+    conf_low = unname(quantile(boot_means, 0.025)),
+    conf_high = unname(quantile(boot_means, 0.975)),
+    p_boot = min(1, 2 * min(p_lower, p_upper)))
+}
+
+safe_rank_correlation <- function(x, y, method = "spearman") {
+  keep <- complete.cases(x, y)
+  if (sum(keep) < 2 || length(unique(x[keep])) < 2 ||
+      length(unique(y[keep])) < 2) return(NA_real_)
+  suppressWarnings(cor(x[keep], y[keep], method = method))
+}
+```
+
+# Prepare the analysis data
+
+```{r prepare-data}
+dat <- combined_long %>%
+  mutate(
+    p = extract_index(Parameter_Set, "p"),
+    mc = extract_index(Parameter_Set, "mc"),
+    synmc = extract_index(Parameter_Set, "synmc"),
+    TargetType = ifelse(
+      is.na(TargetType),
+      ifelse(stringr::str_starts(Target, "X"), "Continuous", "Categorical"),
+      TargetType
+    ),
+    Data_Type = ifelse(
+      is.na(Data_Type),
+      ifelse(
+        stringr::str_detect(Synthesis_Model, "hier"),
+        "hierarchical", "parametric"
+      ),
+      Data_Type
+    ),
+    Data_Type = dplyr::recode(Data_Type, linear = "parametric"),
+    Synth_Family = family_from_model(Synthesis_Model),
+    Pred_Family = family_from_model(Prediction_Model)
+  ) %>%
+  filter(
+    !(Prediction_Model == "bnpred" & TargetType == "Continuous"),
+    !(stringr::str_detect(Synthesis_Model, "^bn") &
+        TargetType == "Continuous")
+  )
+
+orig_df <- dat %>% filter(is.na(synmc))
+synth_df <- dat %>% filter(!is.na(synmc))
+
+orig_rel <- relativize(orig_df)
+synth_rel <- relativize(synth_df)
+
+score_check <- bind_rows(orig_rel, synth_rel) %>%
+  summarise(
+    n = n(),
+    n_missing = sum(is.na(rel)),
+    min_score = min(rel, na.rm = TRUE),
+    max_score = max(rel, na.rm = TRUE))
+print(score_check)
+```
+
+The relative score is one for the best prediction model in a dataset and lies
+between zero and one for the remaining models. For (R^2), the score is based
+on unexplained variation, ((1-R^2_{\mathrm{best}})/(1-R^2_m)), so negative
+values of (R^2) remain admissible.
+
+## Match original and synthetic results
+
+```{r match-results}
+comparison_keys <- c(
+  "Data_Type", "p", "mc", "TargetType", "Target", "Metric", "Pred_Family")
+
+orig_all <- orig_rel %>%
+  filter(Pred_Family %in% c("cart", "svm", "parm", "bn")) %>%
+  dplyr::select(all_of(comparison_keys), value_orig = Value,
+         rel_orig = rel)
+
+synth_same <- synth_rel %>%
+  filter(Pred_Family == Synth_Family) %>%
+  dplyr::select(
+    all_of(comparison_keys), synmc, Synthesis_Model, Synth_Family,
+    value_synth = Value, rel_synth = rel)
+
+# This is the original same-family join. Missing matches are left as NA and
+# handled by mean(..., na.rm = TRUE), exactly as in the initial script.
+reinforce <- synth_same %>%
+  left_join(orig_all, by = comparison_keys) %>%
+  mutate(Reinforcement = rel_synth / rel_orig) %>%
+  filter(is_selected_target(p, Target))
+
+same_family_ratio <- reinforce %>%
+  mutate(
+    reinforcement_ratio = Reinforcement,
+    same_family = TRUE
+  )
+
+reinforce_avg <- reinforce %>%
+  group_by(Data_Type, p, mc, Metric, TargetType, Synth_Family, Target) %>%
+  summarise(Reinforcement = mean(Reinforcement, na.rm = TRUE), .groups = "drop")
+
+metrics_cont <- reinforce_avg %>%
+  filter(TargetType == "Continuous") %>%
+  distinct(Metric) %>%
+  pull(Metric)
+metrics_cat <- reinforce_avg %>%
+  filter(TargetType == "Categorical") %>%
+  distinct(Metric) %>%
+  pull(Metric)
+
+print(
+  reinforce %>%
+    count(Data_Type, TargetType, Synth_Family, name = "n") %>%
+    arrange(Data_Type, TargetType, Synth_Family),
+  n = Inf
+)
+```
+
+# Same-family reinforcement ratio
+
+This reproduces the original analysis. For each synthesis method, it compares
+the relative-to-best score of the matching prediction model on synthetic and
+original data:
+
+\[
+R_{s} = \frac{\operatorname{rel}^{\mathrm{syn}}_{s,s}}
+              {\operatorname{rel}^{\mathrm{orig}}_{s}}.
+\]
+
+Values above one indicate that the matching prediction model moved closer to
+the best-performing model after synthesis.
+
+```{r same-family-ratio}
+plot_one_panel_avg <- function(data, metric_name, target_type_label) {
+  plot_data <- data %>%
+    filter(
+      Metric == metric_name,
+      TargetType == target_type_label,
+      is.finite(Reinforcement)
+    )
+ 
+  if (nrow(plot_data) == 0) {
+    return(
+      ggplot() +
+        labs(subtitle = "No data for this combination") +
+        theme_void()
+    )
+  }
+ 
+  is_continuous <- target_type_label == "Continuous"
+ 
+  if (is_continuous &&
+      metric_name %in% c("RMSE", "R_squared", "MAE")) {
+    y_min_plot <- 0.5
+    y_max_plot <- 20
+ 
+  } else if (is_continuous) {
+    y_min <- min(plot_data$Reinforcement, na.rm = TRUE)
+    y_max <- max(plot_data$Reinforcement, na.rm = TRUE)
+    y_pad <- 0.05 * (y_max - y_min)
+ 
+    if (!is.finite(y_pad) || y_pad == 0) {
+      y_pad <- 0.05
+    }
+ 
+    y_min_plot <- y_min - y_pad
+    y_max_plot <- y_max + y_pad
+ 
+  } else if (metric_name %in% c("Accuracy", "F1")) {
+    scale_data <- plot_data %>%
+      filter(Data_Type == "hierarchical")
+ 
+    y_min <- min(scale_data$Reinforcement, na.rm = TRUE)
+    y_max <- max(scale_data$Reinforcement, na.rm = TRUE)
+    y_pad <- 0.05 * (y_max - y_min)
+ 
+    if (!is.finite(y_pad) || y_pad == 0) {
+      y_pad <- 0.05
+    }
+ 
+    y_min_plot <- y_min - y_pad
+    y_max_plot <- y_max + y_pad
+ 
+  } else if (metric_name == "Specificity") {
+    y_min_plot <- 0.7
+    y_max_plot <- 2.2
+ 
+  } else {
+    y_min <- min(plot_data$Reinforcement, na.rm = TRUE)
+    y_max <- max(plot_data$Reinforcement, na.rm = TRUE)
+    y_pad <- 0.05 * (y_max - y_min)
+ 
+    if (!is.finite(y_pad) || y_pad == 0) {
+      y_pad <- 0.05
+    }
+ 
+    y_min_plot <- y_min - y_pad
+    y_max_plot <- y_max + y_pad
+  }
+ 
+  plot_data <- plot_data %>%
+    mutate(
+      Synth_Family = factor(
+        Synth_Family,
+        levels = family_order
+      ),
+      is_outlier = Reinforcement < y_min_plot |
+        Reinforcement > y_max_plot,
+      clipped_side = case_when(
+        Reinforcement > y_max_plot ~ "upper",
+        Reinforcement < y_min_plot ~ "lower",
+        TRUE ~ "inside"
+      )
+    )
+ 
+  inside <- plot_data %>%
+    filter(!is_outlier)
+ 
+  outliers <- plot_data %>%
+    filter(is_outlier) %>%
+    mutate(
+      Reinforcement_clipped = case_when(
+        clipped_side == "upper" ~ y_max_plot,
+        clipped_side == "lower" ~ y_min_plot
+      ),
+      outlier_label_single = format(
+        round(Reinforcement, 2),
+        nsmall = 2
+      )
+    ) %>%
+    group_by(
+      Data_Type,
+      p,
+      mc,
+      Metric,
+      TargetType,
+      Synth_Family,
+      clipped_side
+    ) %>%
+    summarise(
+      Reinforcement_clipped = first(Reinforcement_clipped),
+      outlier_label = paste(
+        outlier_label_single,
+        collapse = "\n"
+      ),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      label_y = case_when(
+        clipped_side == "upper" ~
+          Reinforcement_clipped -
+          0.06 * (y_max_plot - y_min_plot),
+        clipped_side == "lower" ~
+          Reinforcement_clipped +
+          0.06 * (y_max_plot - y_min_plot)
+      ),
+      x_outlier = as.numeric(factor(mc)) +
+        case_when(
+          Synth_Family %in% c("bn", "parm") ~ -0.24,
+          Synth_Family == "cart" ~ 0.08,
+          Synth_Family == "svm" ~ 0.24,
+          TRUE ~ 0
+        )
+    )
+ 
+  ggplot(
+    inside,
+    aes(
+      x = factor(mc),
+      y = Reinforcement,
+      color = Synth_Family
+    )
+  ) +
+    geom_point(
+      position = position_dodge(width = 0.7),
+      size = 2.5
+    ) +
+    geom_point(
+      data = outliers,
+      aes(
+        x = x_outlier,
+        y = Reinforcement_clipped,
+        color = Synth_Family
+      ),
+      size = 2.5,
+      alpha = 0.3,
+      inherit.aes = FALSE
+    ) +
+    geom_text(
+      data = outliers,
+      aes(
+        x = x_outlier,
+        y = label_y,
+        label = outlier_label,
+        color = Synth_Family
+      ),
+      size = 2,
+      lineheight = 1,
+      show.legend = FALSE,
+      inherit.aes = FALSE
+    ) +
+    facet_grid(
+      rows = vars(Data_Type),
+      cols = vars(p),
+      scales = "fixed",
+      labeller = labeller(
+        Data_Type = data_type_labels
+      )
+    ) +
+    geom_hline(
+      yintercept = 1,
+      linetype = "dotted"
+    ) +
+    scale_color_manual(
+      values = family_palette,
+      breaks = family_order,
+      labels = family_labels,
+      name = "Synthesis model"
+    ) +
+    coord_cartesian(
+      ylim = c(y_min_plot, y_max_plot),
+      clip = "off"
+    ) +
+    labs(
+      x = paste(
+        "simulation replication per type of simulation and",
+        "number of variables"
+      ),
+      y = "R"
+    ) +
+    theme(
+      axis.text.x = element_text(
+        angle = 0,
+        hjust = 0.5
+      ),
+      plot.margin = margin(5.5, 30, 5.5, 5.5)
+    )
+}
+ 
+for (metric_name in metrics_cont) {
+  plot <- plot_one_panel_avg(
+    reinforce_avg,
+    metric_name,
+    "Continuous"
+  )
+ 
+  print(plot)
+ 
+  ggsave(
+    file.path(
+      figure_dir,
+      paste0(
+        "Reinforcement_avgSynmc_",
+        metric_name,
+        "_Continuous.png"
+      )
+    ),
+    plot,
+    width = 11,
+    height = 6,
+    dpi = 300
+  )
+}
+ 
+for (metric_name in metrics_cat) {
+  plot <- plot_one_panel_avg(
+    reinforce_avg,
+    metric_name,
+    "Categorical"
+  )
+ 
+  print(plot)
+ 
+  ggsave(
+    file.path(
+      figure_dir,
+      paste0(
+        "Reinforcement_avgSynmc_",
+        metric_name,
+        "_Categorical.png"
+      )
+    ),
+    plot,
+    width = 11,
+    height = 6,
+    dpi = 300
+  )
+}
+```
+
+# Full synthesis-by-prediction matrix
+
+The reinforcement ratio considers only the prediction model matching the
+synthesizer. To determine whether the matching model is uniquely favored, the
+following analysis retains every synthesis-by-prediction combination. For
+synthesis family (s) and prediction family (m), define
+
+\[
+\Delta_{s,m} =
+\operatorname{rel}^{\mathrm{syn}}_{s,m}
+- \operatorname{rel}^{\mathrm{orig}}_{m}.
+\]
+
+A positive value means that prediction model (m) moved closer to the best
+model after synthesis by (s). A same-family reinforcement mechanism predicts
+that diagonal cells, where (s=m), are more positive than off-diagonal cells.
+
+## Construct and summarize the matrix
+
+```{r reinforcement-matrix}
+# The matrix is an extension of the original analysis. It starts from the same
+# orig_rel and synth_rel objects, but retains every prediction family. An inner
+# join restricts this extension to directly comparable original/synthetic rows;
+# it does not alter the original same-family reinforcement objects above.
+original_scores <- orig_all %>%
+  filter(is_selected_target(p, Target))
+
+synthetic_scores <- synth_rel %>%
+  filter(Pred_Family %in% c("cart", "svm", "parm", "bn")) %>%
+  filter(is_selected_target(p, Target)) %>%
+  dplyr::select(
+    all_of(comparison_keys), synmc, Synthesis_Model, Synth_Family,
+    value_synth = Value, rel_synth = rel
+  )
+
+comparison <- synthetic_scores %>%
+  inner_join(original_scores, by = comparison_keys) %>%
+  mutate(
+    delta_relative = rel_synth - rel_orig,
+    same_family = Synth_Family == Pred_Family
+  )
+
+matrix_coverage <- tibble(
+  synthetic_rows = nrow(synthetic_scores),
+  comparable_rows = nrow(comparison),
+  comparable_share = comparable_rows / synthetic_rows
+)
+print(matrix_coverage)
+
+# Synthesis draws are repeated measurements from the same fitted generator.
+# Average before estimating uncertainty.
+matrix_unit <- comparison %>%
+  group_by(
+    Data_Type, p, mc, TargetType, Target, Metric,
+    Synthesis_Model, Synth_Family, Pred_Family, same_family
+  ) %>%
+  summarise(
+    rel_orig = first(rel_orig),
+    rel_synth = mean(rel_synth),
+    delta_relative = mean(delta_relative),
+    .groups = "drop")
+
+# Average targets within each independently simulated original dataset.
+matrix_cluster <- matrix_unit %>%
+  group_by(
+    Data_Type, p, mc, TargetType, Metric,
+    Synth_Family, Pred_Family, same_family
+  ) %>%
+  summarise(delta_relative = mean(delta_relative), .groups = "drop")
+
+matrix_summary <- matrix_cluster %>%
+  group_by(
+    Data_Type, TargetType, Metric,
+    Synth_Family, Pred_Family, same_family
+  ) %>%
+  group_modify(~ bootstrap_mean_summary(.x$delta_relative)) %>%
+  ungroup() %>%
+  mutate(
+    Synth_Family = factor(Synth_Family, levels = family_order),
+    Pred_Family = factor(Pred_Family, levels = family_order))
+
+matrix_summary_by_p <- matrix_cluster %>%
+  group_by(
+    Data_Type, p, TargetType, Metric,
+    Synth_Family, Pred_Family, same_family
+  ) %>%
+  group_modify(~ bootstrap_mean_summary(.x$delta_relative)) %>%
+  ungroup()
+
+readr::write_csv(
+  matrix_summary,
+  file.path(table_dir, "reinforcement_matrix_summary.csv"))
+readr::write_csv(
+  matrix_summary_by_p,
+  file.path(table_dir, "reinforcement_matrix_summary_by_p.csv"))
+```
+
+## Matrix heatmaps
+
+```{r matrix-heatmaps, fig.height=8}
+plot_reinforcement_matrix <- function(data, target_type) {
+  plot_data <- data %>%
+    filter(TargetType == target_type) %>%
+    mutate(
+      Metric = factor(
+        Metric,
+        levels = if (target_type == "Continuous") {
+          continuous_metrics
+        } else {
+          categorical_metrics
+        }))
+
+  if (nrow(plot_data) == 0) {
+    message("No matrix observations for ", target_type, "; this plot is skipped.")
+    return(NULL)
+  }
+
+  fill_limit <- max(abs(plot_data$estimate), na.rm = TRUE)
+  ggplot(
+    plot_data,
+    aes(x = Pred_Family, y = Synth_Family, fill = estimate)
+  ) +
+    geom_tile(color = "white", linewidth = 0.7) +
+    geom_tile(
+      data = filter(plot_data, same_family),
+      fill = NA, color = "black", linewidth = 1
+    ) +
+    geom_text(aes(label = sprintf("%+.3f", estimate)), size = 3) +
+    facet_grid(
+      rows = vars(Metric), cols = vars(Data_Type),
+      labeller = labeller(Data_Type = data_type_labels)
+    ) +
+    scale_x_discrete(labels = family_labels, drop = TRUE) +
+    scale_y_discrete(labels = family_labels, drop = TRUE) +
+    scale_fill_gradient2(
+      low = "#3B6FB6", mid = "white", high = "#C83E4D",
+      midpoint = 0, limits = c(-fill_limit, fill_limit),
+      name = expression(Delta["relative"])
+    ) +
+    labs(
+      x = "Prediction model",
+      y = "Synthesis model"
+    ) +
+    coord_equal() +
+    theme_minimal(base_size = 11) +
+    theme(
+      legend.position = "bottom",
+      panel.grid = element_blank(),
+      strip.text = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 35, hjust = 1))
+}
+
+matrix_plot_continuous <- plot_reinforcement_matrix(matrix_summary, "Continuous")
+matrix_plot_categorical <- plot_reinforcement_matrix(matrix_summary, "Categorical")
+
+if (!is.null(matrix_plot_continuous)) {
+  ggsave(
+    file.path(figure_dir, "reinforcement_matrix_continuous.png"),
+    matrix_plot_continuous, width = 5, height = 8, dpi = 300)
+  print(matrix_plot_continuous)
+}
+if (!is.null(matrix_plot_categorical)) {
+  ggsave(
+    file.path(figure_dir, "reinforcement_matrix_categorical.png"),
+    matrix_plot_categorical, width = 5, height = 8, dpi = 300)
+  print(matrix_plot_categorical)
+}
+```
+
+# Diagonal-versus-off-diagonal reinforcement
+
+For each original dataset, target, metric, and synthesis family, define the
+diagonal advantage as
+
+\[
+A_s = \Delta_{s,s}
+- \frac{1}{|\mathcal{M}_s|-1}
+  \sum_{m \neq s}\Delta_{s,m}.
+\]
+
+Thus, $A_s>0$ means that the matching prediction model improved more than the
+average nonmatching model. This directly tests the model-family-specific claim;
+it cannot be generated merely because all initially weak models move closer to
+the best model.
+
+## Estimate the diagonal advantage
+
+```{r diagonal-contrast}
+diagonal_case <- matrix_unit %>%
+  group_by(
+    Data_Type, p, mc, TargetType, Target, Metric,
+    Synthesis_Model, Synth_Family
+  ) %>%
+  summarise(
+    matched_delta = if (sum(same_family) == 1) {
+      delta_relative[same_family]
+    } else {
+      NA_real_
+    },
+    off_diagonal_delta = mean(delta_relative[!same_family]),
+    n_off_diagonal = sum(!same_family),
+    diagonal_advantage = matched_delta - off_diagonal_delta,
+    .groups = "drop"
+  ) %>%
+  filter(is.finite(diagonal_advantage))
+
+# Targets and synthesis draws are averaged within each independent original
+# simulation dataset. The remaining p-by-mc rows are the bootstrap clusters.
+diagonal_cluster <- diagonal_case %>%
+  group_by(Data_Type, p, mc, TargetType, Metric, Synth_Family) %>%
+  summarise(
+    diagonal_advantage = mean(diagonal_advantage),
+    .groups = "drop")
+
+diagonal_summary <- diagonal_cluster %>%
+  group_by(Data_Type, TargetType, Metric, Synth_Family) %>%
+  group_modify(~ bootstrap_mean_summary(.x$diagonal_advantage)) %>%
+  ungroup()
+
+# For an overall result, first average metrics within each original dataset so
+# that datasets, rather than metrics, determine the effective sample size.
+diagonal_overall_cluster <- diagonal_cluster %>%
+  group_by(Data_Type, p, mc, TargetType, Synth_Family) %>%
+  summarise(
+    diagonal_advantage = mean(diagonal_advantage),
+    .groups = "drop")
+
+diagonal_overall_summary <- diagonal_overall_cluster %>%
+  group_by(Data_Type, TargetType, Synth_Family) %>%
+  group_modify(~ bootstrap_mean_summary(.x$diagonal_advantage)) %>%
+  ungroup()
+
+readr::write_csv(
+  diagonal_summary,
+  file.path(table_dir, "diagonal_advantage_by_metric.csv"))
+readr::write_csv(
+  diagonal_overall_summary,
+  file.path(table_dir, "diagonal_advantage_overall.csv"))
+
+diagonal_results_table <- diagonal_overall_summary %>%
+  mutate(
+    Synthesis_model = dplyr::recode(
+      Synth_Family, !!!as.list(family_labels)),
+    Data = dplyr::recode(
+      Data_Type, !!!as.list(data_type_labels))) %>%
+  dplyr::select(
+    Data, TargetType, Synthesis_model, n_clusters,
+    estimate, conf_low, conf_high, p_boot) %>%
+  arrange(Data, TargetType, Synthesis_model)
+ 
+print(diagonal_results_table, n = Inf)
+```
+
+## Plot diagonal advantage
+
+```{r diagonal-plot}
+diagonal_plot <- diagonal_overall_summary %>%
+  mutate(Synth_Family = factor(Synth_Family, levels = family_order)) %>%
+  ggplot(aes(x = Synth_Family, y = estimate, color = Synth_Family)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey45") +
+  geom_errorbar(
+    aes(ymin = conf_low, ymax = conf_high), width = 0.12, linewidth = 0.6
+  ) +
+  geom_point(size = 2.6) +
+  facet_grid(
+    rows = vars(TargetType), cols = vars(Data_Type),
+    scales = "free_y", labeller = labeller(Data_Type = data_type_labels)
+  ) +
+  scale_x_discrete(labels = family_labels, drop = TRUE) +
+  scale_color_manual(values = family_palette, guide = "none") +
+  labs(
+    x = "Synthesis model",
+    y = "Diagonal advantage"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.spacing.x = grid::unit(1.5, "lines"),
+    panel.spacing.y = grid::unit(2, "lines"),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 35, hjust = 1))
+
+ggsave(
+  file.path(figure_dir, "diagonal_advantage.png"),
+  diagonal_plot, width = 9, height = 6, dpi = 300)
+diagonal_plot
+```
+
+## Random-label permutation test
+
+The bootstrap evaluates uncertainty across independently simulated original
+datasets. As an additional design-based check, the following permutation test
+randomly assigns the "matching" label to one prediction model within every
+case. The null hypothesis is that diagonal alignment is no more favorable than
+a randomly chosen synthesis-prediction pairing.
+
+```{r permutation-test}
+permutation_diagonal_test <- function(data, reps = permutation_reps,
+                                      seed = random_seed) {
+  case_variables <- c(
+    "p", "mc", "Target", "Metric", "Synthesis_Model", "Synth_Family")
+  case_id <- do.call(
+    interaction,
+    c(data[case_variables], list(drop = TRUE, lex.order = TRUE)))
+  cases <- split(data, case_id)
+  cases <- cases[vapply(cases, function(x) {
+    nrow(x) >= 2 && sum(x$Pred_Family == x$Synth_Family) == 1
+  }, logical(1))]
+
+  case_advantage <- function(case_data, matched_index) {
+    case_data$delta_relative[matched_index] -
+      mean(case_data$delta_relative[-matched_index])
+  }
+
+  observed <- mean(vapply(cases, function(case_data) {
+    matched_index <- which(case_data$Pred_Family == case_data$Synth_Family)
+    case_advantage(case_data, matched_index)
+  }, numeric(1)))
+
+  set.seed(seed)
+  null_statistics <- replicate(reps, {
+    mean(vapply(cases, function(case_data) {
+      pseudo_match <- sample.int(nrow(case_data), 1)
+      case_advantage(case_data, pseudo_match)
+    }, numeric(1)))
+  })
+
+  tibble(
+    n_cases = length(cases),
+    observed_advantage = observed,
+    null_mean = mean(null_statistics),
+    p_one_sided = (sum(null_statistics >= observed) + 1) / (reps + 1),
+    p_two_sided = (sum(abs(null_statistics) >= abs(observed)) + 1) / (reps + 1))
+}
+
+permutation_summary <- matrix_unit %>%
+  group_by(Data_Type, TargetType, Synth_Family) %>%
+  group_modify(~ permutation_diagonal_test(.x), .keep = TRUE) %>%
+  ungroup()
+
+readr::write_csv(
+  permutation_summary,
+  file.path(table_dir, "diagonal_permutation_tests.csv"))
+print(permutation_summary, n = Inf)
+```
+
+# Ranking and model-selection analysis
+
+The matrix analysis asks how every prediction model moves relative to its
+original-data position. The ranking analysis complements it by asking whether
+the identity of the selected model or the complete ranking changes.
+
+```{r ranking-analysis}
+original_rank <- original_scores %>%
+  group_by(Data_Type, p, mc, TargetType, Target, Metric) %>%
+  mutate(
+    rank_orig = case_when(
+      first(Metric) %in% higher_better ~ rank(-value_orig, ties.method = "average"),
+      first(Metric) %in% lower_better ~ rank(value_orig, ties.method = "average")
+    ),
+    best_orig = rank_orig == min(rank_orig)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(all_of(comparison_keys), rank_orig, best_orig)
+
+synthetic_rank <- synthetic_scores %>%
+  group_by(
+    Data_Type, p, mc, synmc, Synthesis_Model, Synth_Family,
+    TargetType, Target, Metric
+  ) %>%
+  mutate(
+    rank_synth = case_when(
+      first(Metric) %in% higher_better ~ rank(-value_synth, ties.method = "average"),
+      first(Metric) %in% lower_better ~ rank(value_synth, ties.method = "average")
+    ),
+    best_synth = rank_synth == min(rank_synth)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(
+    all_of(comparison_keys), synmc, Synthesis_Model, Synth_Family,
+    rank_synth, best_synth)
+
+rank_comparison <- synthetic_rank %>%
+  left_join(original_rank, by = comparison_keys)
+
+ranking_metrics <- rank_comparison %>%
+  group_by(
+    Data_Type, p, mc, synmc, Synthesis_Model, Synth_Family,
+    TargetType, Target, Metric
+  ) %>%
+  summarise(
+    top1_agreement = any(best_orig & best_synth, na.rm = TRUE),
+    synthetic_best_is_same_family = any(
+      best_synth & Pred_Family == Synth_Family, na.rm = TRUE
+    ),
+    original_best_is_synth_family = any(
+      best_orig & Pred_Family == Synth_Family, na.rm = TRUE
+    ),
+    synth_family_rank_orig = dplyr::first(
+      rank_orig[Pred_Family == Synth_Family], default = NA_real_
+    ),
+    synth_family_rank_synth = dplyr::first(
+      rank_synth[Pred_Family == Synth_Family], default = NA_real_
+    ),
+    spearman_rho = safe_rank_correlation(rank_orig, rank_synth, "spearman"),
+    kendall_tau = safe_rank_correlation(rank_orig, rank_synth, "kendall"),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ranking_reversal = !top1_agreement,
+    reversal_to_synth_family = ranking_reversal & synthetic_best_is_same_family,
+    synth_family_becomes_winner = synthetic_best_is_same_family &
+      !original_best_is_synth_family,
+    synth_family_rank_change = synth_family_rank_synth - synth_family_rank_orig)
+
+ranking_summary <- ranking_metrics %>%
+  group_by(Synth_Family, Synthesis_Model, Data_Type, p, Metric, TargetType) %>%
+  summarise(
+    n_cases = n(),
+    n_reversals = sum(ranking_reversal, na.rm = TRUE),
+    reversal_rate = mean(ranking_reversal, na.rm = TRUE),
+    n_reversals_to_synth_family = sum(
+      reversal_to_synth_family, na.rm = TRUE
+    ),
+    share_reversals_to_synth_family = if_else(
+      n_reversals > 0,
+      n_reversals_to_synth_family / n_reversals,
+      NA_real_
+    ),
+    n_synth_family_becomes_winner = sum(
+      synth_family_becomes_winner, na.rm = TRUE
+    ),
+    synth_family_becomes_winner_rate = mean(
+      synth_family_becomes_winner, na.rm = TRUE
+    ),
+    mean_synth_family_rank_change = mean(
+      synth_family_rank_change, na.rm = TRUE
+    ),
+    top1_agreement = mean(top1_agreement, na.rm = TRUE),
+    spearman_rho = mean(spearman_rho, na.rm = TRUE),
+    kendall_tau = mean(kendall_tau, na.rm = TRUE),
+    .groups = "drop")
+
+ranking_overall <- ranking_metrics %>%
+  summarise(
+    n_cases = n(),
+    n_reversals = sum(ranking_reversal, na.rm = TRUE),
+    reversal_rate = mean(ranking_reversal, na.rm = TRUE),
+    n_reversals_to_synth_family = sum(
+      reversal_to_synth_family, na.rm = TRUE
+    ),
+    share_reversals_to_synth_family = if_else(
+      n_reversals > 0,
+      n_reversals_to_synth_family / n_reversals,
+      NA_real_
+    ),
+    n_synth_family_becomes_winner = sum(
+      synth_family_becomes_winner, na.rm = TRUE
+    ),
+    synth_family_becomes_winner_rate = mean(
+      synth_family_becomes_winner, na.rm = TRUE
+    ))
+
+readr::write_csv(
+  ranking_overall,
+  file.path(table_dir, "ranking_overall.csv"))
+write.csv(
+  ranking_summary,
+  file.path(table_dir, "ranking_summary.csv"),
+  row.names = FALSE
+)
+
+print(ranking_overall)
+```
+
+# Cases without same-family reinforcement
+
+This table identifies cases in which the same-family reinforcement ratio is
+below one.
+
+```{r exceptions}
+reinforcement_exceptions <- same_family_ratio %>%
+  filter(reinforcement_ratio < 1) %>%
+  dplyr::select(
+    Data_Type, p, mc, synmc, TargetType, Target, Metric,
+    Synth_Family, rel_orig, rel_synth, reinforcement_ratio
+  ) %>%
+  arrange(Synth_Family, Data_Type, p, mc, synmc, Target, Metric)
+
+exception_summary <- reinforcement_exceptions %>%
+  count(
+    Synth_Family, Data_Type, p, TargetType, Target, Metric,
+    name = "n_synthesis_draws"
+  ) %>%
+  arrange(desc(n_synthesis_draws))
+
+readr::write_csv(
+  reinforcement_exceptions,
+  file.path(table_dir, "same_family_reinforcement_exceptions.csv"))
+readr::write_csv(
+  exception_summary,
+  file.path(table_dir, "same_family_exception_summary.csv"))
+
+print(head(exception_summary, 20), n = 20)
+```
+
+# Save analysis objects and session information
+
+```{r save-results}
+saveRDS(
+  list(
+    comparison = comparison,
+    same_family_ratio = same_family_ratio,
+    matrix_unit = matrix_unit,
+    matrix_summary = matrix_summary,
+    diagonal_case = diagonal_case,
+    diagonal_summary = diagonal_summary,
+    diagonal_overall_summary = diagonal_overall_summary,
+    permutation_summary = permutation_summary,
+    ranking_metrics = ranking_metrics,
+    ranking_summary = ranking_summary
+  ),
+  file.path(table_dir, "reinforcement_analysis_objects.rds"))
+```
+
+# Interpretation guide
+
+- **Reinforcement ratio (R>1):** the matching prediction model moved closer
+  to the best-performing model after synthesis.
+- **Matrix cell \(\Delta_{s,m}>0\):** prediction family (m) improved relative
+  to its original-data position after synthesis by family (s).
+- **Diagonal advantage \(A_s>0\):** the matching prediction model improved more
+  than the average nonmatching model.
+- **Bootstrap interval excluding zero:** the positive diagonal advantage is
+  consistent across independently simulated original datasets.
+- **Small one-sided permutation p-value:** the observed diagonal alignment is
+  more favorable than expected under random synthesis-prediction matching.
+
+The diagonal contrast is the primary analysis for the model-family-specific
+claim. The reinforcement ratio remains useful descriptively but, by itself,
+does not establish that matching models improve more than all other models.

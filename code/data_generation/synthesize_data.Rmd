@@ -1,0 +1,199 @@
+---
+title: "Synthetic Data Generation"
+output: html_document
+date: "2026-09-16"
+---
+ 
+# Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+```
+ 
+# Packages
+```{r packages}
+# List of required packages
+list_of_packages <- c("MASS", "ggplot2", "dplyr", "caret", "rpart", "tidyr", "glmnet" ,"synthpop", "purrr", "MonteCarlo", "tidyverse", "Matrix", "caret", "bnlearn", "stringr", "future", "furrr", "parallelly")
+
+# Function to install a package if it is not already installed
+install_if_missing <- function(p){
+  if(!requireNamespace(p, quietly = TRUE)){
+    install.packages(p)
+  }
+  library(p, character.only=TRUE)
+}
+
+# Install and load packages
+lapply(list_of_packages, install_if_missing)
+```
+ 
+# Load simulation data
+```{r load-data}
+sim_hierarchical <- readRDS(file.path(data_dir, "sim_hierarchical.rds"))
+sim_linear <- readRDS(file.path(data_dir, "sim_linear.rds"))
+ 
+expected_names <- unlist(lapply(c(6, 12, 18), function(p) paste0("p", p, "_mc", 1:5)))
+ 
+missing_hier <- setdiff(expected_names, names(sim_hierarchical))
+missing_linear <- setdiff(expected_names, names(sim_linear))
+ 
+if (length(missing_hier) > 0) {stop(
+    "Missing hierarchical datasets: ",
+    paste(missing_hier, collapse = ", "))}
+ 
+if (length(missing_linear) > 0) {stop(
+    "Missing parametric datasets: ",
+    paste(missing_linear, collapse = ", "))}
+ 
+cat("Hierarchical datasets:", length(sim_hierarchical), "\n")
+cat("Parametric datasets:", length(sim_linear), "\n")
+```
+ 
+# Load synthesis functions
+```{r synthesis-functions}
+source(here::here("code", "synthesis.R"))
+```
+ 
+# Synthesis methods
+```{r synthesis-methods}
+synth_methods <- list(
+  parm = list(name = "parm", func = synthesize_data_parametric),
+  cart = list(name = "cart", func = synthesize_data_cart),
+  bn = list( name = "bn", func = synthesize_data_bn),
+  svm = list(name = "svm", func = synthesize_data_svm))
+ 
+run_and_save_synthesis <- function(data, 
+                                   method, 
+                                   object_name, 
+                                   mc_reps = 5,
+                                   output_dir = here::here("data")) {
+ 
+  cat("\nRunning", method$name, "synthesis for", length(data), "original datasets...\n")
+ 
+  result <- synthesize_data_model(
+    simulated_data = data,
+    synth_method = method,
+    mc_reps = mc_reps)
+ 
+  assign(object_name, result, envir = .GlobalEnv)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+ 
+  output_path <- file.path(output_dir, paste0(object_name, ".RData"))
+  save(list = object_name, file = output_path, envir = .GlobalEnv)
+
+  invisible(result)
+}
+```
+ 
+# Hierarchical simulation: synthesis
+ 
+## Parametric synthesis
+```{r parm-hierarchical}
+parm_hiersyn <- run_and_save_synthesis(
+  data = sim_hierarchical,
+  method = synth_methods$parm,
+  object_name = "parm_hiersyn")
+```
+ 
+## CART synthesis
+```{r cart-hierarchical}
+cart_hiersyn <- run_and_save_synthesis(
+  data = sim_hierarchical,
+  method = synth_methods$cart,
+  object_name = "cart_hiersyn")
+```
+ 
+## Bayesian network synthesis
+```{r bn-hierarchical}
+bn_hiersyn <- run_and_save_synthesis(
+  data = sim_hierarchical,
+  method = synth_methods$bn,
+  object_name = "bn_hiersyn")
+```
+ 
+## SVM synthesis
+```{r svm-hierarchical-parallel}
+workers <- min(4, future::availableCores())
+future::plan(future::multisession, workers = workers)
+ 
+svm_hiersyn <- furrr::future_map(
+  names(sim_hierarchical),
+  function(dataset_name) {
+    single_dataset <- stats::setNames(
+      list(sim_hierarchical[[dataset_name]]), dataset_name)
+ 
+    synthesize_data_model(
+      simulated_data = single_dataset,
+      synth_method = list(name = "svm", func = synthesize_data_svm),
+      mc_reps = 5)
+  },
+  .options = furrr::furrr_options(
+    seed = TRUE,
+    packages = c("purrr", "e1071", "FNN"))) %>%
+  purrr::flatten()
+ 
+save(svm_hiersyn,
+     file = file.path(data_dir, "svm_hiersyn.RData"))
+ 
+cat("Saved svm_hiersyn with", length(svm_hiersyn),
+    "synthetic datasets.\n")
+ 
+future::plan(future::sequential)
+```
+
+# Parametric simulation: synthesis
+ 
+## Parametric synthesis
+```{r parm-linear, eval=FALSE}
+parm_linsyn <- run_and_save_synthesis(
+  data = sim_linear,
+  method = synth_methods$parm,
+  object_name = "parm_linsyn")
+```
+ 
+## CART synthesis
+```{r cart-linear, eval=FALSE}
+cart_linsyn <- run_and_save_synthesis(
+  data = sim_linear,
+  method = synth_methods$cart,
+  object_name = "cart_linsyn")
+```
+ 
+## Bayesian network synthesis
+```{r bn-linear, eval=FALSE}
+bn_linsyn <- run_and_save_synthesis(
+  data = sim_linear,
+  method = synth_methods$bn,
+  object_name = "bn_linsyn")
+```
+ 
+## SVM synthesis
+```{r svm-linear}
+svm_linsyn <- run_and_save_synthesis(
+  data = sim_linear,
+  method = synth_methods$svm,
+  object_name = "svm_linsyn")
+```
+ 
+# Validation
+```{r validation}
+expected_synthetic_n <- length(sim_hierarchical) * 5
+ 
+hier_objects <- c(
+  "parm_hiersyn",
+  "cart_hiersyn",
+  "bn_hiersyn",
+  "svm_hiersyn")
+ 
+for (obj in hier_objects) {
+ 
+  x <- get(obj)
+ 
+  if (length(x) != expected_synthetic_n) {
+    warning(obj, " contains ", length(x), " datasets; expected ", expected_synthetic_n, ".")
+  } else {
+    cat(obj, ":", length(x), "synthetic datasets -- OK\n")
+  }
+}
+ 
+```
+ 
