@@ -1,0 +1,5 @@
+dataset,n_cases,n_same_best,same_best_rate,n_different_best,different_best_rate,n_synthetic_best_same_family,synthetic_best_same_family_rate,n_reversals_to_synth_family,share_reversals_to_synth_family,n_synth_family_becomes_winner,synth_family_becomes_winner_rate
+Adult,80,24,0.3,56,0.7,45,0.5625,34,0.6071428571428571,34,0.425
+BankMarketing,80,35,0.4375,45,0.5625,34,0.425,19,0.4222222222222222,19,0.2375
+BikeSharing,45,30,0.6666666666666666,15,0.3333333333333333,24,0.5333333333333333,9,0.6,9,0.2
+GermanCredit,80,54,0.675,26,0.325,28,0.35,11,0.4230769230769231,11,0.1375
