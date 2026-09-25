@@ -1,2 +1,0 @@
-n_cases,n_same_best,same_best_rate,n_different_best,different_best_rate,n_synthetic_best_same_family,synthetic_best_same_family_rate,n_reversals_to_synth_family,share_reversals_to_synth_family,n_synth_family_becomes_winner,synth_family_becomes_winner_rate
-285,143,0.5017543859649123,142,0.4982456140350877,131,0.45964912280701753,73,0.5140845070422535,73,0.256140350877193
