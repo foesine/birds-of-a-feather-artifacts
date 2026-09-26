@@ -7,7 +7,8 @@ date: "2025-05-08"
 ```{r, message=FALSE, warning=TRUE, error=TRUE}
 # List of required packages
 list_of_packages <- c("MASS", "ggplot2", "dplyr", "caret", "rpart", "tidyr", "here", "glmnet" ,"synthpop", "purrr", "MonteCarlo", "tidyverse", "Matrix", "caret", "e1071", "stringr", "tidyr", "bnlearn", "tibble")
-
+ 
+ 
 # Function to install a package if it is not already installed
 install_if_missing <- function(p){
   if(!requireNamespace(p, quietly = TRUE)){
@@ -18,7 +19,8 @@ install_if_missing <- function(p){
 # Install and load packages
 lapply(list_of_packages, install_if_missing)
 ```
-
+ 
+ 
 # Directories
 ```{r}
 data_dir <- here::here("data")
@@ -28,7 +30,8 @@ table_dir <- here::here("results", "additional_materials")
 dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
 ```
-
+ 
+ 
 # check data structures
 ```{r}
 # Define the models you expect
@@ -56,97 +59,90 @@ for (ef in expected_files) {
 # only keep the files that match our expected patterns
 files <- files[basename(files) %in% expected_files]
  
-all_results <- purrr::map_dfr(files, function(file_path) {
+all_results <- map_dfr(files, function(file_path) {
+  # parse the file's basename into two parts
   fname <- basename(file_path)
-  name <- stringr::str_remove(fname, "\\.RData$")
-  parts <- stringr::str_split(name, "_", simplify = TRUE)
-  pred_model <- parts[1]
+  name  <- str_remove(fname, "\\.RData$")
+  parts <- str_split(name, "_", simplify = TRUE)
+  pred_model  <- parts[1]
   synth_model <- parts[2]
  
+  # load into temp env
   tmp <- new.env()
   load(file_path, envir = tmp)
-  obj_name <- ls(tmp)[1]
-  res_list <- tmp[[obj_name]]
+  obj_name <- ls(tmp)[1]         # e.g. "bnpred_cartlinsyn"
+  res_list <- tmp[[obj_name]]    # this is a list of parameter‐sets
  
-  purrr::map_dfr(names(res_list), function(param_name) {
+  # now each element of res_list is itself a list of targets
+  map_dfr(names(res_list), function(param_name) {
     param_list <- res_list[[param_name]]
- 
     if (!is.list(param_list)) {
-      warning("Skipping non-list element ", param_name, " in ", fname)
+      warning("Skipping non‐list element ", param_name, " in ", fname)
       return(NULL)
     }
- 
-    purrr::map_dfr(names(param_list), function(target) {
+    map_dfr(names(param_list), function(target) {
       df <- param_list[[target]]
- 
       if (!is.data.frame(df)) {
-        warning("Skipping non-data.frame target ", target,
+        warning("Skipping non‐data.frame target ", target,
                 " in param ", param_name, " of ", fname)
         return(NULL)
       }
- 
-      dplyr::mutate(
-        df,
-        Prediction_Model = pred_model,
-        Synthesis_Model = synth_model,
-        Parameter_Set = param_name,
-        Target = target,
-        .before = dplyr::everything()
-      )
+      # annotate
+      df %>%
+        mutate(
+          Prediction_Model = pred_model,
+          Synthesis_Model  = synth_model,
+          Parameter_Set    = param_name,
+          Target           = target,
+          .before          = everything()
+        )
     })
   })
 })
  
-combined_long <- all_results |>
-  dplyr::select(-Sensitivity) |>
+# Retain the wide results as an intermediate object.
+combined_results <- all_results
+ 
+# The reinforcement analysis consumes this long-format object.
+combined_long <- combined_results %>%
+  dplyr::select(-dplyr::any_of("Sensitivity")) %>%
   tidyr::pivot_longer(
-    cols = c(Accuracy, Specificity, F1, MAE, RMSE, R_squared),
+    cols = dplyr::all_of(
+      c("MAE", "RMSE", "R_squared", "Accuracy", "F1", "Specificity")),
     names_to = "Metric",
     values_to = "Value",
-    values_drop_na = TRUE)
-```
+    values_drop_na = TRUE) %>%
+  dplyr::mutate(
+    TargetType = dplyr::if_else(
+      stringr::str_starts(Target, "X"), "Continuous", "Categorical"),
+    Data_Type = dplyr::if_else(
+      stringr::str_detect(Synthesis_Model, "hier"),
+      "hierarchical", "parametric"))
  
-```{r}
-# combined_results has columns:
-# Prediction_Model, Synthesis_Model, Target, Accuracy, Sensitivity, Specificity
+required_long_columns <- c(
+  "Prediction_Model", "Synthesis_Model", "Parameter_Set", "Target",
+  "Metric", "Value", "TargetType", "Data_Type")
+missing_long_columns <- setdiff(required_long_columns, names(combined_long))
+if (length(missing_long_columns) > 0) {
+  stop(
+    "combined_long is missing required columns: ",
+    paste(missing_long_columns, collapse = ", "))
+}
  
-combined_filtered <- combined_results %>%
-  # drop any missing accuracies
-  filter(!is.na(Accuracy)) %>%
-  # derive Data_Type from your synthesis model name
-  mutate(
-    Data_Type = ifelse(str_detect(Synthesis_Model, "hier"), 
-                       "hierarchical", 
-                       "linear"),
-    # tag continuous vs categorical by the Target prefix
-    TargetType = ifelse(str_starts(Target, "X"),
-                        "Continuous", 
-                        "Categorical")
-  )
-```
-
-```{r}
-# Pivot long and tag types
-combined_long <- combined_results %>%
-  pivot_longer(
-    cols      = c(MAE, RMSE, R_squared, Accuracy, F1, Specificity),
-    names_to  = "Metric",
-    values_to = "Value"
-  ) %>%
-  filter(!is.na(Value)) %>%
-  mutate(
-    TargetType = ifelse(str_starts(Target, "X"), "Continuous", "Categorical"),
-    Data_Type  = ifelse(str_detect(Synthesis_Model, "hier"), "hierarchical", "linear")
-  )
- 
-# Split into the two Metric‐TargetType combos
+# Split into two metric-target-type combinations for quick checks.
 df_cont <- combined_long %>%
-  filter(TargetType == "Continuous", Metric == "RMSE")
+  dplyr::filter(TargetType == "Continuous", Metric == "RMSE")
+df_cat <- combined_long %>%
+  dplyr::filter(TargetType == "Categorical", Metric == "Accuracy")
  
-df_cat  <- combined_long %>%
-  filter(TargetType == "Categorical", Metric == "Accuracy")
 save(combined_long, file = file.path(data_dir, "combined_long.RData"))
-readr::write_csv(combined_long, file = file.path(table_dir, "prediction_results.csv"))
+readr::write_csv(
+  combined_long,
+  file = file.path(table_dir, "prediction_results.csv"))
+ 
+cat(
+  "Saved", nrow(combined_long),
+  "long-format prediction results to combined_long.RData\n")
 ```
  
 ```{r fig.show='hold', warning=FALSE, message=FALSE}
@@ -166,7 +162,9 @@ cat_metrics  <- c("Accuracy", "F1", "Specificity")
 # helpers for pretty labels
 metric_title  <- function(m) if (m == "R_squared") "R\u00B2" else m         # title uses R²
 metric_ylabel <- function(m) if (m == "R_squared") expression(R^2) else m    # y-axis uses R²
-dtype_title   <- function(d) if (tolower(d) == "linear") "parametric" else "hierarchical"
+dtype_title <- function(d) {
+  if (tolower(d) %in% c("linear", "parametric")) "parametric" else "hierarchical"
+}
  
 # map synthesis model names to unified tick labels
 syn_labeller <- function(v) {
@@ -274,11 +272,11 @@ for (dtype in unique(combined_long$Data_Type)) {
     if (!is.null(y_limits)) {
       p <- p + coord_cartesian(ylim = y_limits)
     }
-    
+ 
     # save & print
     fname <- file.path(figure_dir, paste0(
       gsub("[^A-Za-z0-9]+", "_", paste(metric_title(metric), "for Continuous Targets —", dtype_label)),".png"))
-    
+ 
     ggsave(fname, plot = p, width = 8, height = 6)
     print(p)
   }
@@ -335,20 +333,22 @@ for (dtype in unique(combined_long$Data_Type)) {
     # caps for specificity variants
     if (tolower(dtype) == "hierarchical" && metric == "Specificity") {
       p <- p + coord_cartesian(ylim = c(0.5, 1))
-    } else if (tolower(dtype) == "linear" && metric == "Specificity") {
+    } else if (tolower(dtype) %in% c("linear", "parametric") &&
+               metric == "Specificity") {
       p <- p + coord_cartesian(ylim = c(0.72, 1))
     }
-    
+ 
     fname <- file.path(figure_dir, paste0(
       gsub("[^A-Za-z0-9]+", "_", paste(metric_title(metric), "for Categorical Targets —", dtype_label)),".png"))
-    
+ 
     ggsave(fname, plot = p, width = 8, height = 6)
     print(p)
   }
 }
  
 ```
-
+ 
+ 
 ```{r}
 syn_labeller <- function(v) {
   dplyr::recode(v,

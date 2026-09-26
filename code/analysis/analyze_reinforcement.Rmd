@@ -28,14 +28,10 @@ if (length(missing_packages) > 0) {
        paste(missing_packages, collapse = ", "))
 }
 invisible(lapply(packages, library, character.only = TRUE))
+```
 
+```{r}
 # Configuration for sequential execution in RStudio.
-data_file <- file.path(data_dir, "combined_long.RData")
-bootstrap_reps <- 4999L
-permutation_reps <- 4999L
-random_seed <- 1234L
-set.seed(random_seed)
-
 data_dir <- here::here("data")
 figure_dir <- here::here("results", "figures")
 table_dir <- here::here("results", "additional_materials")
@@ -43,6 +39,12 @@ table_dir <- here::here("results", "additional_materials")
 dir.create(data_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+ 
+data_file <- file.path(data_dir, "combined_long.RData")
+bootstrap_reps <- 4999L
+permutation_reps <- 4999L
+random_seed <- 1234L
+set.seed(random_seed)
 ```
 
 ## Load the combined results
@@ -847,226 +849,732 @@ ggsave(
 diagonal_plot
 ```
 
-## Random-label permutation test
-
+## Ceiling-aware random-label cluster permutation analysis
+ 
+The diagonal advantage may be negative when the matching prediction family was
+already best on the original data and therefore had no scope to improve, while
+other prediction families moved closer to it. Such cases do not provide
+negative evidence against same-family reinforcement. We therefore identify
+cases in which the matching prediction family was already best and remained
+unchanged after synthesis. These ceiling-constrained cases remain part of the
+descriptive matrices but are excluded from the following headroom-eligible
+inferential analysis.
+ 
 The bootstrap evaluates uncertainty across independently simulated original
-datasets. As an additional design-based check, the following permutation test
-randomly assigns the "matching" label to one prediction model within every
-case. The null hypothesis is that diagonal alignment is no more favorable than
-a randomly chosen synthesis-prediction pairing.
-
+datasets. As an additional robustness check, the random-label analysis
+designates one prediction family as the focal family within every independent
+dataset. The null hypothesis is that the actual diagonal alignment is no more
+favorable than an alignment based on a randomly designated focal prediction
+family.
+ 
 ```{r permutation-test}
-permutation_diagonal_test <- function(data, reps = permutation_reps,
-                                      seed = random_seed) {
-  case_variables <- c(
-    "p", "mc", "Target", "Metric", "Synthesis_Model", "Synth_Family")
-  case_id <- do.call(
-    interaction,
-    c(data[case_variables], list(drop = TRUE, lex.order = TRUE)))
-  cases <- split(data, case_id)
-  cases <- cases[vapply(cases, function(x) {
-    nrow(x) >= 2 && sum(x$Pred_Family == x$Synth_Family) == 1
+best_tolerance <- 1e-8
+ 
+ceiling_case_keys <- c(
+  "Data_Type", "p", "mc", "TargetType", "Target", "Metric",
+  "Synthesis_Model", "Synth_Family"
+)
+ 
+# Identify cases in which the matching prediction family was already best on
+# the original data and remained unchanged after synthesis.
+diagonal_case_ceiling <- matrix_unit %>%
+  group_by(across(all_of(ceiling_case_keys))) %>%
+  summarise(
+    matched_rel_orig = if (sum(same_family) == 1) {
+      rel_orig[same_family]
+    } else {
+      NA_real_
+    },
+    matched_delta = if (sum(same_family) == 1) {
+      delta_relative[same_family]
+    } else {
+      NA_real_
+    },
+    off_diagonal_delta = mean(delta_relative[!same_family]),
+    n_off_diagonal = sum(!same_family),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    diagonal_advantage = matched_delta - off_diagonal_delta,
+    ceiling_constrained =
+      matched_rel_orig >= 1 - best_tolerance &
+      abs(matched_delta) <= best_tolerance
+  ) %>%
+  filter(
+    is.finite(matched_rel_orig),
+    is.finite(matched_delta),
+    is.finite(diagonal_advantage)
+  )
+ 
+ceiling_summary <- diagonal_case_ceiling %>%
+  group_by(Data_Type, TargetType, Synth_Family) %>%
+  summarise(
+    n_target_metric_cases = n(),
+    n_ceiling_cases = sum(ceiling_constrained),
+    n_informative_cases = sum(!ceiling_constrained),
+    ceiling_share = mean(ceiling_constrained),
+    .groups = "drop"
+  )
+ 
+readr::write_csv(
+  diagonal_case_ceiling,
+  file.path(table_dir, "diagonal_ceiling_cases.csv")
+)
+readr::write_csv(
+  ceiling_summary,
+  file.path(table_dir, "diagonal_ceiling_summary.csv")
+)
+ 
+# Retain all prediction-family rows belonging to non-ceiling cases.
+matrix_unit_informative <- matrix_unit %>%
+  inner_join(
+    diagonal_case_ceiling %>%
+      dplyr::select(
+        all_of(ceiling_case_keys),
+        ceiling_constrained
+      ),
+    by = ceiling_case_keys
+  ) %>%
+  filter(!ceiling_constrained)
+ 
+diagonal_case_informative <- diagonal_case_ceiling %>%
+  filter(!ceiling_constrained)
+ 
+# Average targets within each metric and independent p-by-mc dataset.
+diagonal_metric_cluster_informative <- diagonal_case_informative %>%
+  group_by(
+    Data_Type, p, mc, TargetType, Metric, Synth_Family
+  ) %>%
+  summarise(
+    diagonal_advantage = mean(diagonal_advantage),
+    .groups = "drop"
+  )
+ 
+# Average metrics within each independent dataset. Consequently, datasets
+# rather than individual targets or metrics determine the effective sample
+# size of the bootstrap.
+diagonal_cluster_informative <- diagonal_metric_cluster_informative %>%
+  group_by(Data_Type, p, mc, TargetType, Synth_Family) %>%
+  summarise(
+    diagonal_advantage = mean(diagonal_advantage),
+    .groups = "drop"
+  )
+ 
+diagonal_summary_informative <- diagonal_cluster_informative %>%
+  group_by(Data_Type, TargetType, Synth_Family) %>%
+  group_modify(
+    ~ bootstrap_mean_summary(.x$diagonal_advantage)
+  ) %>%
+  ungroup()
+ 
+readr::write_csv(
+  diagonal_summary_informative,
+  file.path(
+    table_dir,
+    "diagonal_advantage_headroom_eligible.csv"
+  )
+)
+ 
+# Construct the same p-by-mc analysis units for the random-label analysis.
+# Targets are first averaged within metrics and metrics are then averaged
+# within each independently generated original dataset.
+permutation_metric_cluster <- matrix_unit_informative %>%
+  group_by(
+    Data_Type, p, mc, TargetType, Metric,
+    Synth_Family, Pred_Family
+  ) %>%
+  summarise(
+    delta_relative = mean(delta_relative),
+    .groups = "drop"
+  )
+ 
+permutation_cluster_data <- permutation_metric_cluster %>%
+  group_by(
+    Data_Type, p, mc, TargetType,
+    Synth_Family, Pred_Family
+  ) %>%
+  summarise(
+    delta_relative = mean(delta_relative),
+    .groups = "drop"
+  ) %>%
+  filter(is.finite(delta_relative))
+ 
+permutation_diagonal_test <- function(data, reps = permutation_reps) {
+  cluster_id <- interaction(
+    data$p,
+    data$mc,
+    drop = TRUE,
+    lex.order = TRUE
+  )
+ 
+  clusters <- split(data, cluster_id)
+  clusters <- clusters[vapply(clusters, function(x) {
+    nrow(x) >= 2 &&
+      sum(x$Pred_Family == x$Synth_Family) == 1 &&
+      anyDuplicated(x$Pred_Family) == 0
   }, logical(1))]
-
-  case_advantage <- function(case_data, matched_index) {
-    case_data$delta_relative[matched_index] -
-      mean(case_data$delta_relative[-matched_index])
+ 
+  if (length(clusters) == 0) {
+    return(tibble(
+      n_permutation_clusters = 0L,
+      observed_advantage = NA_real_,
+      null_mean = NA_real_,
+      p_one_sided = NA_real_,
+      p_two_sided = NA_real_
+    ))
   }
-
-  observed <- mean(vapply(cases, function(case_data) {
-    matched_index <- which(case_data$Pred_Family == case_data$Synth_Family)
-    case_advantage(case_data, matched_index)
+ 
+  cluster_advantage <- function(cluster_data, focal_index) {
+    cluster_data$delta_relative[focal_index] -
+      mean(cluster_data$delta_relative[-focal_index])
+  }
+ 
+  observed <- mean(vapply(clusters, function(cluster_data) {
+    matching_index <- which(
+      cluster_data$Pred_Family ==
+        cluster_data$Synth_Family
+    )
+    cluster_advantage(cluster_data, matching_index)
   }, numeric(1)))
-
-  set.seed(seed)
+ 
   null_statistics <- replicate(reps, {
-    mean(vapply(cases, function(case_data) {
-      pseudo_match <- sample.int(nrow(case_data), 1)
-      case_advantage(case_data, pseudo_match)
+    mean(vapply(clusters, function(cluster_data) {
+      random_focal_index <- sample.int(
+        nrow(cluster_data),
+        size = 1
+      )
+      cluster_advantage(
+        cluster_data,
+        random_focal_index
+      )
     }, numeric(1)))
   })
-
+ 
+  null_mean <- mean(null_statistics)
+ 
   tibble(
-    n_cases = length(cases),
+    n_permutation_clusters = length(clusters),
     observed_advantage = observed,
-    null_mean = mean(null_statistics),
-    p_one_sided = (sum(null_statistics >= observed) + 1) / (reps + 1),
-    p_two_sided = (sum(abs(null_statistics) >= abs(observed)) + 1) / (reps + 1))
+    null_mean = null_mean,
+    p_one_sided =
+      (sum(null_statistics >= observed) + 1) /
+      (reps + 1),
+    p_two_sided = (
+      sum(
+        abs(null_statistics - null_mean) >=
+          abs(observed - null_mean)
+      ) + 1
+    ) / (reps + 1)
+  )
 }
-
-permutation_summary <- matrix_unit %>%
+ 
+set.seed(random_seed)
+ 
+permutation_summary <- permutation_cluster_data %>%
   group_by(Data_Type, TargetType, Synth_Family) %>%
-  group_modify(~ permutation_diagonal_test(.x), .keep = TRUE) %>%
+  group_modify(
+    ~ permutation_diagonal_test(.x),
+    .keep = TRUE
+  ) %>%
   ungroup()
-
+ 
 readr::write_csv(
   permutation_summary,
-  file.path(table_dir, "diagonal_permutation_tests.csv"))
-print(permutation_summary, n = Inf)
+  file.path(
+    table_dir,
+    "diagonal_permutation_tests.csv"
+  )
+)
+ 
+# Combine the ceiling information, headroom-eligible bootstrap results, and
+# conditional random-label results.
+diagonal_inference_summary <- ceiling_summary %>%
+  left_join(
+    diagonal_summary_informative,
+    by = c(
+      "Data_Type",
+      "TargetType",
+      "Synth_Family"
+    )
+  ) %>%
+  left_join(
+    permutation_summary,
+    by = c(
+      "Data_Type",
+      "TargetType",
+      "Synth_Family"
+    )
+  ) %>%
+  dplyr::select(
+    Data_Type,
+    TargetType,
+    Synth_Family,
+    n_target_metric_cases,
+    n_ceiling_cases,
+    n_informative_cases,
+    ceiling_share,
+    n_clusters,
+    estimate,
+    std_error,
+    conf_low,
+    conf_high,
+    n_permutation_clusters,
+    observed_advantage,
+    null_mean,
+    p_one_sided,
+    p_two_sided
+  )
+ 
+# The bootstrap estimate and observed permutation statistic should agree
+# because both use the same headroom-eligible p-by-mc analysis units.
+estimate_difference <- abs(
+  diagonal_inference_summary$estimate -
+    diagonal_inference_summary$observed_advantage
+)
+ 
+if (any(estimate_difference > 1e-10, na.rm = TRUE)) {
+  warning(
+    "The bootstrap estimate and observed permutation statistic do not agree. ",
+    "Check the aggregation levels before interpreting the results."
+  )
+}
+ 
+readr::write_csv(
+  diagonal_inference_summary,
+  file.path(
+    table_dir,
+    "diagonal_inference_summary.csv"
+  )
+)
+ 
+# Classify the conclusions. Fully ceiling-constrained settings are explicitly
+# excluded from the assessment of agreement and cannot count as negative
+# evidence against the matching-family argument.
+inference_agreement <- diagonal_inference_summary %>%
+  mutate(
+    bootstrap_conclusion = case_when(
+      n_informative_cases == 0 ~
+        "Ceiling-constrained",
+      is.na(conf_low) | is.na(conf_high) ~
+        "Not estimable",
+      conf_low > 0 ~
+        "Positive diagonal advantage",
+      conf_high < 0 ~
+        "Negative diagonal advantage",
+      TRUE ~
+        "Inconclusive"
+    ),
+    permutation_conclusion = case_when(
+      n_informative_cases == 0 ~
+        "Ceiling-constrained",
+      is.na(p_two_sided) |
+        is.na(observed_advantage) |
+        is.na(null_mean) ~
+        "Not estimable",
+      p_two_sided < 0.05 &
+        observed_advantage > null_mean ~
+        "Positive diagonal advantage",
+      p_two_sided < 0.05 &
+        observed_advantage < null_mean ~
+        "Negative diagonal advantage",
+      TRUE ~
+        "Inconclusive"
+    ),
+    conclusions_agree = case_when(
+      bootstrap_conclusion %in%
+        c("Ceiling-constrained", "Not estimable") ~
+        NA,
+      permutation_conclusion %in%
+        c("Ceiling-constrained", "Not estimable") ~
+        NA,
+      TRUE ~
+        bootstrap_conclusion ==
+        permutation_conclusion
+    )
+  )
+ 
+inference_agreement_summary <- inference_agreement %>%
+  summarise(
+    n_settings = n(),
+    n_fully_ceiling_settings =
+      sum(n_informative_cases == 0),
+    n_evaluable_settings =
+      sum(!is.na(conclusions_agree)),
+    n_agree =
+      sum(conclusions_agree, na.rm = TRUE),
+    n_disagree =
+      sum(!conclusions_agree, na.rm = TRUE),
+    agreement_rate =
+      mean(conclusions_agree, na.rm = TRUE)
+  )
+ 
+if (
+  inference_agreement_summary$n_evaluable_settings == 0
+) {
+  support_sentence <- paste(
+    "The agreement between the random-label and",
+    "cluster-bootstrap results could not be evaluated."
+  )
+} else if (
+  inference_agreement_summary$n_disagree == 0
+) {
+  support_sentence <- paste(
+    "The random-label results support the",
+    "cluster-bootstrap results across all",
+    inference_agreement_summary$n_evaluable_settings,
+    "evaluable settings."
+  )
+} else {
+  support_sentence <- paste(
+    "The random-label results do not consistently support",
+    "the cluster-bootstrap results: the two procedures",
+    "yield the same inferential conclusion in",
+    inference_agreement_summary$n_agree,
+    "of",
+    inference_agreement_summary$n_evaluable_settings,
+    "evaluable settings."
+  )
+}
+ 
+total_target_metric_cases <- sum(
+  ceiling_summary$n_target_metric_cases
+)
+total_ceiling_cases <- sum(
+  ceiling_summary$n_ceiling_cases
+)
+ 
+ceiling_sentence <- paste(
+  total_ceiling_cases,
+  "of",
+  total_target_metric_cases,
+  "dataset-target-metric cases are ceiling-constrained.",
+  "They remain in the descriptive matrices but are excluded",
+  "from the headroom-eligible inferential comparison."
+)
+ 
+inference_disagreements <- inference_agreement %>%
+  filter(conclusions_agree %in% FALSE) %>%
+  dplyr::select(
+    Data_Type,
+    TargetType,
+    Synth_Family,
+    n_ceiling_cases,
+    n_informative_cases,
+    estimate,
+    conf_low,
+    conf_high,
+    p_two_sided,
+    bootstrap_conclusion,
+    permutation_conclusion
+  )
+ 
+readr::write_csv(
+  inference_agreement,
+  file.path(
+    table_dir,
+    "diagonal_inference_method_comparison.csv"
+  )
+)
+ 
+print(ceiling_summary, n = Inf)
+print(diagonal_inference_summary, n = Inf)
+print(inference_agreement_summary)
+cat("\n", ceiling_sentence, "\n", sep = "")
+cat("\n", support_sentence, "\n", sep = "")
+ 
+if (nrow(inference_disagreements) > 0) {
+  cat(
+    "\nSettings with different inferential conclusions:\n"
+  )
+  print(inference_disagreements, n = Inf)
+}
 ```
-
+ 
 # Ranking and model-selection analysis
-
+ 
 The matrix analysis asks how every prediction model moves relative to its
 original-data position. The ranking analysis complements it by asking whether
 the identity of the selected model or the complete ranking changes.
-
+ 
 ```{r ranking-analysis}
 original_rank <- original_scores %>%
-  group_by(Data_Type, p, mc, TargetType, Target, Metric) %>%
+  group_by(
+    Data_Type,
+    p,
+    mc,
+    TargetType,
+    Target,
+    Metric
+  ) %>%
   mutate(
     rank_orig = case_when(
-      first(Metric) %in% higher_better ~ rank(-value_orig, ties.method = "average"),
-      first(Metric) %in% lower_better ~ rank(value_orig, ties.method = "average")
+      first(Metric) %in% higher_better ~
+        rank(-value_orig, ties.method = "average"),
+      first(Metric) %in% lower_better ~
+        rank(value_orig, ties.method = "average")
     ),
     best_orig = rank_orig == min(rank_orig)
   ) %>%
   ungroup() %>%
-  dplyr::select(all_of(comparison_keys), rank_orig, best_orig)
-
+  dplyr::select(
+    all_of(comparison_keys),
+    rank_orig,
+    best_orig
+  )
+ 
 synthetic_rank <- synthetic_scores %>%
   group_by(
-    Data_Type, p, mc, synmc, Synthesis_Model, Synth_Family,
-    TargetType, Target, Metric
+    Data_Type,
+    p,
+    mc,
+    synmc,
+    Synthesis_Model,
+    Synth_Family,
+    TargetType,
+    Target,
+    Metric
   ) %>%
   mutate(
     rank_synth = case_when(
-      first(Metric) %in% higher_better ~ rank(-value_synth, ties.method = "average"),
-      first(Metric) %in% lower_better ~ rank(value_synth, ties.method = "average")
+      first(Metric) %in% higher_better ~
+        rank(-value_synth, ties.method = "average"),
+      first(Metric) %in% lower_better ~
+        rank(value_synth, ties.method = "average")
     ),
     best_synth = rank_synth == min(rank_synth)
   ) %>%
   ungroup() %>%
   dplyr::select(
-    all_of(comparison_keys), synmc, Synthesis_Model, Synth_Family,
-    rank_synth, best_synth)
-
+    all_of(comparison_keys),
+    synmc,
+    Synthesis_Model,
+    Synth_Family,
+    rank_synth,
+    best_synth
+  )
+ 
 rank_comparison <- synthetic_rank %>%
-  left_join(original_rank, by = comparison_keys)
-
+  left_join(
+    original_rank,
+    by = comparison_keys
+  )
+ 
 ranking_metrics <- rank_comparison %>%
   group_by(
-    Data_Type, p, mc, synmc, Synthesis_Model, Synth_Family,
-    TargetType, Target, Metric
+    Data_Type,
+    p,
+    mc,
+    synmc,
+    Synthesis_Model,
+    Synth_Family,
+    TargetType,
+    Target,
+    Metric
   ) %>%
   summarise(
-    top1_agreement = any(best_orig & best_synth, na.rm = TRUE),
+    top1_agreement =
+      any(best_orig & best_synth, na.rm = TRUE),
     synthetic_best_is_same_family = any(
-      best_synth & Pred_Family == Synth_Family, na.rm = TRUE
+      best_synth &
+        Pred_Family == Synth_Family,
+      na.rm = TRUE
     ),
     original_best_is_synth_family = any(
-      best_orig & Pred_Family == Synth_Family, na.rm = TRUE
+      best_orig &
+        Pred_Family == Synth_Family,
+      na.rm = TRUE
     ),
     synth_family_rank_orig = dplyr::first(
-      rank_orig[Pred_Family == Synth_Family], default = NA_real_
+      rank_orig[Pred_Family == Synth_Family],
+      default = NA_real_
     ),
     synth_family_rank_synth = dplyr::first(
-      rank_synth[Pred_Family == Synth_Family], default = NA_real_
+      rank_synth[Pred_Family == Synth_Family],
+      default = NA_real_
     ),
-    spearman_rho = safe_rank_correlation(rank_orig, rank_synth, "spearman"),
-    kendall_tau = safe_rank_correlation(rank_orig, rank_synth, "kendall"),
+    spearman_rho = safe_rank_correlation(
+      rank_orig,
+      rank_synth,
+      "spearman"
+    ),
+    kendall_tau = safe_rank_correlation(
+      rank_orig,
+      rank_synth,
+      "kendall"
+    ),
     .groups = "drop"
   ) %>%
   mutate(
     ranking_reversal = !top1_agreement,
-    reversal_to_synth_family = ranking_reversal & synthetic_best_is_same_family,
-    synth_family_becomes_winner = synthetic_best_is_same_family &
+    reversal_to_synth_family =
+      ranking_reversal &
+      synthetic_best_is_same_family,
+    synth_family_becomes_winner =
+      synthetic_best_is_same_family &
       !original_best_is_synth_family,
-    synth_family_rank_change = synth_family_rank_synth - synth_family_rank_orig)
-
+    synth_family_rank_change =
+      synth_family_rank_synth -
+      synth_family_rank_orig
+  )
+ 
 ranking_summary <- ranking_metrics %>%
-  group_by(Synth_Family, Synthesis_Model, Data_Type, p, Metric, TargetType) %>%
+  group_by(
+    Synth_Family,
+    Synthesis_Model,
+    Data_Type,
+    p,
+    Metric,
+    TargetType
+  ) %>%
   summarise(
     n_cases = n(),
-    n_reversals = sum(ranking_reversal, na.rm = TRUE),
-    reversal_rate = mean(ranking_reversal, na.rm = TRUE),
-    n_reversals_to_synth_family = sum(
-      reversal_to_synth_family, na.rm = TRUE
-    ),
-    share_reversals_to_synth_family = if_else(
-      n_reversals > 0,
-      n_reversals_to_synth_family / n_reversals,
-      NA_real_
-    ),
-    n_synth_family_becomes_winner = sum(
-      synth_family_becomes_winner, na.rm = TRUE
-    ),
-    synth_family_becomes_winner_rate = mean(
-      synth_family_becomes_winner, na.rm = TRUE
-    ),
-    mean_synth_family_rank_change = mean(
-      synth_family_rank_change, na.rm = TRUE
-    ),
-    top1_agreement = mean(top1_agreement, na.rm = TRUE),
-    spearman_rho = mean(spearman_rho, na.rm = TRUE),
-    kendall_tau = mean(kendall_tau, na.rm = TRUE),
-    .groups = "drop")
-
+    n_reversals =
+      sum(ranking_reversal, na.rm = TRUE),
+    reversal_rate =
+      mean(ranking_reversal, na.rm = TRUE),
+    n_reversals_to_synth_family =
+      sum(
+        reversal_to_synth_family,
+        na.rm = TRUE
+      ),
+    share_reversals_to_synth_family =
+      if_else(
+        n_reversals > 0,
+        n_reversals_to_synth_family /
+          n_reversals,
+        NA_real_
+      ),
+    n_synth_family_becomes_winner =
+      sum(
+        synth_family_becomes_winner,
+        na.rm = TRUE
+      ),
+    synth_family_becomes_winner_rate =
+      mean(
+        synth_family_becomes_winner,
+        na.rm = TRUE
+      ),
+    mean_synth_family_rank_change =
+      mean(
+        synth_family_rank_change,
+        na.rm = TRUE
+      ),
+    top1_agreement =
+      mean(top1_agreement, na.rm = TRUE),
+    spearman_rho =
+      mean(spearman_rho, na.rm = TRUE),
+    kendall_tau =
+      mean(kendall_tau, na.rm = TRUE),
+    .groups = "drop"
+  )
+ 
 ranking_overall <- ranking_metrics %>%
   summarise(
     n_cases = n(),
-    n_reversals = sum(ranking_reversal, na.rm = TRUE),
-    reversal_rate = mean(ranking_reversal, na.rm = TRUE),
-    n_reversals_to_synth_family = sum(
-      reversal_to_synth_family, na.rm = TRUE
-    ),
-    share_reversals_to_synth_family = if_else(
-      n_reversals > 0,
-      n_reversals_to_synth_family / n_reversals,
-      NA_real_
-    ),
-    n_synth_family_becomes_winner = sum(
-      synth_family_becomes_winner, na.rm = TRUE
-    ),
-    synth_family_becomes_winner_rate = mean(
-      synth_family_becomes_winner, na.rm = TRUE
-    ))
-
+    n_reversals =
+      sum(ranking_reversal, na.rm = TRUE),
+    reversal_rate =
+      mean(ranking_reversal, na.rm = TRUE),
+    n_reversals_to_synth_family =
+      sum(
+        reversal_to_synth_family,
+        na.rm = TRUE
+      ),
+    share_reversals_to_synth_family =
+      if_else(
+        n_reversals > 0,
+        n_reversals_to_synth_family /
+          n_reversals,
+        NA_real_
+      ),
+    n_synth_family_becomes_winner =
+      sum(
+        synth_family_becomes_winner,
+        na.rm = TRUE
+      ),
+    synth_family_becomes_winner_rate =
+      mean(
+        synth_family_becomes_winner,
+        na.rm = TRUE
+      )
+  )
+ 
 readr::write_csv(
   ranking_overall,
-  file.path(table_dir, "ranking_overall.csv"))
-write.csv(
-  ranking_summary,
-  file.path(table_dir, "ranking_summary.csv"),
-  row.names = FALSE
+  file.path(table_dir, "ranking_overall.csv")
 )
-
+readr::write_csv(
+  ranking_summary,
+  file.path(table_dir, "ranking_summary.csv")
+)
+ 
 print(ranking_overall)
 ```
-
+ 
 # Cases without same-family reinforcement
-
-This table identifies cases in which the same-family reinforcement ratio is
-below one.
-
+ 
+This table identifies cases in which the matching prediction family moves
+farther from the best-performing model after synthesis. Cases with a
+reinforcement ratio equal to one are not classified as exceptions.
+ 
 ```{r exceptions}
 reinforcement_exceptions <- same_family_ratio %>%
   filter(reinforcement_ratio < 1) %>%
   dplyr::select(
-    Data_Type, p, mc, synmc, TargetType, Target, Metric,
-    Synth_Family, rel_orig, rel_synth, reinforcement_ratio
+    Data_Type,
+    p,
+    mc,
+    synmc,
+    TargetType,
+    Target,
+    Metric,
+    Synth_Family,
+    rel_orig,
+    rel_synth,
+    reinforcement_ratio
   ) %>%
-  arrange(Synth_Family, Data_Type, p, mc, synmc, Target, Metric)
-
+  arrange(
+    Synth_Family,
+    Data_Type,
+    p,
+    mc,
+    synmc,
+    Target,
+    Metric
+  )
+ 
 exception_summary <- reinforcement_exceptions %>%
   count(
-    Synth_Family, Data_Type, p, TargetType, Target, Metric,
+    Synth_Family,
+    Data_Type,
+    p,
+    TargetType,
+    Target,
+    Metric,
     name = "n_synthesis_draws"
   ) %>%
   arrange(desc(n_synthesis_draws))
-
+ 
 readr::write_csv(
   reinforcement_exceptions,
-  file.path(table_dir, "same_family_reinforcement_exceptions.csv"))
+  file.path(
+    table_dir,
+    "same_family_reinforcement_exceptions.csv"
+  )
+)
 readr::write_csv(
   exception_summary,
-  file.path(table_dir, "same_family_exception_summary.csv"))
-
+  file.path(
+    table_dir,
+    "same_family_exception_summary.csv"
+  )
+)
+ 
 print(head(exception_summary, 20), n = 20)
 ```
-
+ 
 # Save analysis objects and session information
-
+ 
 ```{r save-results}
 saveRDS(
   list(
@@ -1076,27 +1584,79 @@ saveRDS(
     matrix_summary = matrix_summary,
     diagonal_case = diagonal_case,
     diagonal_summary = diagonal_summary,
-    diagonal_overall_summary = diagonal_overall_summary,
-    permutation_summary = permutation_summary,
-    ranking_metrics = ranking_metrics,
-    ranking_summary = ranking_summary
+    diagonal_overall_summary =
+      diagonal_overall_summary,
+    diagonal_case_ceiling =
+      diagonal_case_ceiling,
+    ceiling_summary =
+      ceiling_summary,
+    matrix_unit_informative =
+      matrix_unit_informative,
+    diagonal_case_informative =
+      diagonal_case_informative,
+    diagonal_cluster_informative =
+      diagonal_cluster_informative,
+    diagonal_summary_informative =
+      diagonal_summary_informative,
+    permutation_cluster_data =
+      permutation_cluster_data,
+    permutation_summary =
+      permutation_summary,
+    diagonal_inference_summary =
+      diagonal_inference_summary,
+    inference_agreement =
+      inference_agreement,
+    inference_agreement_summary =
+      inference_agreement_summary,
+    inference_disagreements =
+      inference_disagreements,
+    support_sentence =
+      support_sentence,
+    ceiling_sentence =
+      ceiling_sentence,
+    ranking_metrics =
+      ranking_metrics,
+    ranking_summary =
+      ranking_summary,
+    ranking_overall =
+      ranking_overall
   ),
-  file.path(table_dir, "reinforcement_analysis_objects.rds"))
+  file.path(
+    table_dir,
+    "reinforcement_analysis_objects.rds"
+  )
+)
 ```
-
+ 
 # Interpretation guide
-
-- **Reinforcement ratio (R>1):** the matching prediction model moved closer
+ 
+- **Reinforcement ratio \(R>1\):** the matching prediction model moved closer
   to the best-performing model after synthesis.
-- **Matrix cell \(\Delta_{s,m}>0\):** prediction family (m) improved relative
-  to its original-data position after synthesis by family (s).
-- **Diagonal advantage \(A_s>0\):** the matching prediction model improved more
-  than the average nonmatching model.
-- **Bootstrap interval excluding zero:** the positive diagonal advantage is
+- **Reinforcement ratio \(R=1\):** the matching prediction model retained the
+  same relative-to-best performance.
+- **Matrix cell \(\Delta_{s,m}>0\):** prediction family \(m\) improved relative
+  to its original-data position after synthesis by family \(s\).
+- **Ceiling-constrained case:** the matching prediction family was already
+  best on the original data and remained unchanged after synthesis. Such a
+  case is retained descriptively but is not treated as negative evidence.
+- **Headroom-eligible diagonal advantage \(A_s>0\):** among cases in which the
+  matching model had scope to improve, it improved more than the average
+  nonmatching prediction model.
+- **Bootstrap interval above zero:** the positive diagonal advantage is
   consistent across independently simulated original datasets.
-- **Small one-sided permutation p-value:** the observed diagonal alignment is
-  more favorable than expected under random synthesis-prediction matching.
-
-The diagonal contrast is the primary analysis for the model-family-specific
-claim. The reinforcement ratio remains useful descriptively but, by itself,
-does not establish that matching models improve more than all other models.
+- **Bootstrap interval below zero:** competing prediction families improve
+  more on average in cases not explained by the ceiling constraint.
+- **Small two-sided permutation \(p\)-value with a positive observed
+  advantage:** the actual diagonal alignment is more favorable than expected
+  when the focal prediction family is designated at random.
+- **Inconclusive result:** neither procedure distinguishes the observed
+  diagonal advantage from zero or from the random-label reference
+  distribution.
+ 
+The full matrices and original diagonal contrasts describe all cases,
+including those subject to the ceiling constraint. The ceiling-aware
+inferential analysis prevents a matching model that was already best and
+remained best from being interpreted as negative evidence merely because
+competing models subsequently moved closer to it. The reinforcement ratio
+remains useful descriptively but, by itself, does not establish that matching
+models improve more than all other prediction models.

@@ -117,7 +117,7 @@ compare_pred_results <- function(dataset_name,
         levels = c("parmpred", "cartpred", "bnpred", "svmpred")),
       synth_method = factor(
         synth_method, levels = synth_levels, labels = synth_labels)) %>%
-    filter(!is.na(value))
+    filter(!is.na(value), metric != "Sensitivity")
 
   metric_ranges <- plot_df %>%
     group_by(metric) %>%
@@ -403,7 +403,7 @@ Adult_reinf <- compute_reinforcement_real(
 Adult_reinf$plot_metric("Accuracy")
 Adult_reinf$plot_metric("F1")
 Adult_reinf$plot_metric("Specificity")
-Adult_reinf$plot_metric("Sensitivity")
+#Adult_reinf$plot_metric("Sensitivity")
 ```
 
 ## Bank Marketing
@@ -414,7 +414,7 @@ BankMarketing_reinf <- compute_reinforcement_real(
 BankMarketing_reinf$plot_metric("Accuracy")
 BankMarketing_reinf$plot_metric("F1")
 BankMarketing_reinf$plot_metric("Specificity")
-BankMarketing_reinf$plot_metric("Sensitivity")
+#BankMarketing_reinf$plot_metric("Sensitivity")
 ```
 
 ## Bike Sharing
@@ -435,7 +435,7 @@ GermanCredit_reinf <- compute_reinforcement_real(
 GermanCredit_reinf$plot_metric("Accuracy")
 GermanCredit_reinf$plot_metric("F1")
 GermanCredit_reinf$plot_metric("Specificity")
-GermanCredit_reinf$plot_metric("Sensitivity")
+#GermanCredit_reinf$plot_metric("Sensitivity")
 ```
 
 # Save numeric prediction values
