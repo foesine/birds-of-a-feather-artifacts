@@ -204,7 +204,7 @@ compute_reinforcement_real <- function(
     save_plot = TRUE) {
   target_type <- match.arg(target_type)
   higher_better <- c(
-    "Accuracy", "F1", "Specificity", "Sensitivity", "R_squared")
+    "Accuracy", "F1", "Specificity", "R_squared")
   lower_better <- c("RMSE", "MAE")
   pred_methods <- c("parm", "cart", "bn", "svm")
   synth_methods <- c("parmsyn", "cartsyn", "bnsyn", "svmsyn")
@@ -221,6 +221,22 @@ compute_reinforcement_real <- function(
       stringr::str_detect(x, "^parm") ~ "parm",
       stringr::str_detect(x, "^bn") ~ "bn",
       TRUE ~ NA_character_)
+  }
+
+  relative_to_best <- function(metric, value, best_value) {
+    dplyr::case_when(
+      metric %in% c("Accuracy", "F1", "Specificity") & best_value > 0 ~
+        value / best_value,
+      metric %in% c("Accuracy", "F1", "Specificity") & best_value == 0 ~ 1,
+      metric == "R_squared" & 1 - best_value > .Machine$double.eps ~
+        (1 - best_value) / (1 - value),
+      metric == "R_squared" & abs(1 - best_value) <= .Machine$double.eps &
+        abs(value - best_value) <= .Machine$double.eps ~ 1,
+      metric == "R_squared" & abs(1 - best_value) <= .Machine$double.eps ~ 0,
+      metric %in% lower_better & best_value > 0 ~ best_value / value,
+      metric %in% lower_better & best_value == 0 & value == 0 ~ 1,
+      metric %in% lower_better & best_value == 0 ~ 0,
+      TRUE ~ NA_real_)
   }
 
   family_palette <- c(
@@ -288,7 +304,7 @@ compute_reinforcement_real <- function(
   long_df <- all_df %>%
     pivot_longer(
       cols = all_of(metric_cols), names_to = "Metric", values_to = "Value") %>%
-    filter(!is.na(Value)) %>%
+    filter(!is.na(Value), Metric != "Sensitivity") %>%
     mutate(
       TargetType = ifelse(
         target_type == "regression", "Continuous", "Categorical"),
@@ -309,10 +325,7 @@ compute_reinforcement_real <- function(
         Metric %in% higher_better ~ max(Value, na.rm = TRUE),
         Metric %in% lower_better ~ min(Value, na.rm = TRUE),
         TRUE ~ NA_real_),
-      rel_orig = case_when(
-        Metric %in% higher_better ~ Value / best_val,
-        Metric %in% lower_better ~ best_val / Value,
-        TRUE ~ NA_real_)) %>%
+      rel_orig = relative_to_best(Metric, Value, best_val)) %>%
     ungroup() %>%
     dplyr::select(
       dataset, Metric, Pred_Family, Prediction_Model, rel_orig)
@@ -325,10 +338,7 @@ compute_reinforcement_real <- function(
         Metric %in% higher_better ~ max(Value, na.rm = TRUE),
         Metric %in% lower_better ~ min(Value, na.rm = TRUE),
         TRUE ~ NA_real_),
-      rel_synth = case_when(
-        Metric %in% higher_better ~ Value / best_val,
-        Metric %in% lower_better ~ best_val / Value,
-        TRUE ~ NA_real_)) %>%
+      rel_synth = relative_to_best(Metric, Value, best_val)) %>%
     ungroup() %>%
     dplyr::select(
       dataset, synth_method, synth_seed, Metric, Synth_Family,
@@ -403,7 +413,6 @@ Adult_reinf <- compute_reinforcement_real(
 Adult_reinf$plot_metric("Accuracy")
 Adult_reinf$plot_metric("F1")
 Adult_reinf$plot_metric("Specificity")
-#Adult_reinf$plot_metric("Sensitivity")
 ```
 
 ## Bank Marketing
@@ -414,7 +423,6 @@ BankMarketing_reinf <- compute_reinforcement_real(
 BankMarketing_reinf$plot_metric("Accuracy")
 BankMarketing_reinf$plot_metric("F1")
 BankMarketing_reinf$plot_metric("Specificity")
-#BankMarketing_reinf$plot_metric("Sensitivity")
 ```
 
 ## Bike Sharing
@@ -435,7 +443,6 @@ GermanCredit_reinf <- compute_reinforcement_real(
 GermanCredit_reinf$plot_metric("Accuracy")
 GermanCredit_reinf$plot_metric("F1")
 GermanCredit_reinf$plot_metric("Specificity")
-#GermanCredit_reinf$plot_metric("Sensitivity")
 ```
 
 # Save numeric prediction values
@@ -488,7 +495,7 @@ compute_ranking_real <- function(
     long_df, target_type = c("classification", "regression")) {
   target_type <- match.arg(target_type)
   higher_better <- c(
-    "Accuracy", "F1", "Specificity", "Sensitivity", "R_squared")
+    "Accuracy", "F1", "Specificity", "R_squared")
   lower_better <- c("RMSE", "MAE")
 
   family_from_model <- function(x) {
