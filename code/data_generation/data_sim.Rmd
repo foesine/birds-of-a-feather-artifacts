@@ -22,6 +22,12 @@ install_if_missing <- function(p){
 lapply(list_of_packages, install_if_missing)
 ```
 
+# Data directory
+```{r}
+data_dir <- here::here("data")
+dir.create(data_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
 # Simulation fcts
 ```{r}
 source(here::here("code", "simulation.R"))
