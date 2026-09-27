@@ -28,6 +28,9 @@ lapply(list_of_packages, install_if_missing)
  
 # Load simulation data
 ```{r load-data}
+data_dir <- here::here("data")
+dir.create(data_dir, recursive = TRUE, showWarnings = FALSE)
+
 sim_hierarchical <- readRDS(file.path(data_dir, "sim_hierarchical.rds"))
 sim_linear <- readRDS(file.path(data_dir, "sim_linear.rds"))
  
@@ -112,7 +115,7 @@ bn_hiersyn <- run_and_save_synthesis(
  
 ## SVM synthesis
 ```{r svm-hierarchical-parallel}
-workers <- min(4, future::availableCores())
+workers <- min(9, future::availableCores())
 future::plan(future::multisession, workers = workers)
  
 svm_hiersyn <- furrr::future_map(
@@ -168,10 +171,33 @@ bn_linsyn <- run_and_save_synthesis(
  
 ## SVM synthesis
 ```{r svm-linear}
-svm_linsyn <- run_and_save_synthesis(
-  data = sim_linear,
-  method = synth_methods$svm,
-  object_name = "svm_linsyn")
+workers <- min(9, future::availableCores())
+future::plan(future::multisession, workers = workers)
+ 
+svm_linsyn <- furrr::future_map(
+  names(sim_linear),
+  function(dataset_name) {
+    single_dataset <- stats::setNames(
+      list(sim_linear[[dataset_name]]), dataset_name
+    )
+ 
+    synthesize_data_model(
+      simulated_data = single_dataset,
+      synth_method = list(name = "svm", func = synthesize_data_svm),
+      mc_reps = 5
+    )
+  },
+  .options = furrr::furrr_options(
+    seed = TRUE,
+    packages = c("purrr", "e1071", "FNN")
+  )
+) %>%
+  purrr::flatten()
+ 
+save(svm_linsyn, file = file.path(data_dir, "svm_linsyn.RData"))
+ 
+cat("Saved svm_linsyn with", length(svm_linsyn),
+    "synthetic datasets.\n")
 ```
  
 # Validation
