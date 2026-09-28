@@ -1297,126 +1297,6 @@ original-data position. The ranking analysis complements it by asking whether
 the identity of the selected model or the complete ranking changes.
  
 ```{r ranking-analysis}
-original_rank <- original_scores %>%
-  group_by(
-    Data_Type,
-    p,
-    mc,
-    TargetType,
-    Target,
-    Metric
-  ) %>%
-  mutate(
-    rank_orig = case_when(
-      first(Metric) %in% higher_better ~
-        rank(-value_orig, ties.method = "average"),
-      first(Metric) %in% lower_better ~
-        rank(value_orig, ties.method = "average")
-    ),
-    best_orig = rank_orig == min(rank_orig)
-  ) %>%
-  ungroup() %>%
-  dplyr::select(
-    all_of(comparison_keys),
-    rank_orig,
-    best_orig
-  )
- 
-synthetic_rank <- synthetic_scores %>%
-  group_by(
-    Data_Type,
-    p,
-    mc,
-    synmc,
-    Synthesis_Model,
-    Synth_Family,
-    TargetType,
-    Target,
-    Metric
-  ) %>%
-  mutate(
-    rank_synth = case_when(
-      first(Metric) %in% higher_better ~
-        rank(-value_synth, ties.method = "average"),
-      first(Metric) %in% lower_better ~
-        rank(value_synth, ties.method = "average")
-    ),
-    best_synth = rank_synth == min(rank_synth)
-  ) %>%
-  ungroup() %>%
-  dplyr::select(
-    all_of(comparison_keys),
-    synmc,
-    Synthesis_Model,
-    Synth_Family,
-    rank_synth,
-    best_synth
-  )
- 
-rank_comparison <- synthetic_rank %>%
-  left_join(
-    original_rank,
-    by = comparison_keys
-  )
- 
-ranking_metrics <- rank_comparison %>%
-  group_by(
-    Data_Type,
-    p,
-    mc,
-    synmc,
-    Synthesis_Model,
-    Synth_Family,
-    TargetType,
-    Target,
-    Metric
-  ) %>%
-  summarise(
-    top1_agreement =
-      any(best_orig & best_synth, na.rm = TRUE),
-    synthetic_best_is_same_family = any(
-      best_synth &
-        Pred_Family == Synth_Family,
-      na.rm = TRUE
-    ),
-    original_best_is_synth_family = any(
-      best_orig &
-        Pred_Family == Synth_Family,
-      na.rm = TRUE
-    ),
-    synth_family_rank_orig = dplyr::first(
-      rank_orig[Pred_Family == Synth_Family],
-      default = NA_real_
-    ),
-    synth_family_rank_synth = dplyr::first(
-      rank_synth[Pred_Family == Synth_Family],
-      default = NA_real_
-    ),
-    spearman_rho = safe_rank_correlation(
-      rank_orig,
-      rank_synth,
-      "spearman"
-    ),
-    kendall_tau = safe_rank_correlation(
-      rank_orig,
-      rank_synth,
-      "kendall"
-    ),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    ranking_reversal = !top1_agreement,
-    reversal_to_synth_family =
-      ranking_reversal &
-      synthetic_best_is_same_family,
-    synth_family_becomes_winner =
-      synthetic_best_is_same_family &
-      !original_best_is_synth_family,
-    synth_family_rank_change =
-      synth_family_rank_synth -
-      synth_family_rank_orig
-  )
- 
 ranking_summary <- ranking_metrics %>%
   group_by(
     Synth_Family,
@@ -1428,81 +1308,61 @@ ranking_summary <- ranking_metrics %>%
   ) %>%
   summarise(
     n_cases = n(),
-    n_reversals =
-      sum(ranking_reversal, na.rm = TRUE),
-    reversal_rate =
-      mean(ranking_reversal, na.rm = TRUE),
+    n_same_best = sum(top1_agreement, na.rm = TRUE),
+    same_best_rate = mean(top1_agreement, na.rm = TRUE),
+    n_different_best = sum(ranking_reversal, na.rm = TRUE),
+    different_best_rate = mean(ranking_reversal, na.rm = TRUE),
+    n_synthetic_best_same_family =
+      sum(synthetic_best_is_same_family, na.rm = TRUE),
+    synthetic_best_same_family_rate =
+      mean(synthetic_best_is_same_family, na.rm = TRUE),
     n_reversals_to_synth_family =
-      sum(
-        reversal_to_synth_family,
-        na.rm = TRUE
-      ),
-    share_reversals_to_synth_family =
-      if_else(
-        n_reversals > 0,
-        n_reversals_to_synth_family /
-          n_reversals,
-        NA_real_
-      ),
+      sum(reversal_to_synth_family, na.rm = TRUE),
+    share_reversals_to_synth_family = if_else(
+      n_different_best > 0,
+      n_reversals_to_synth_family / n_different_best,
+      NA_real_
+    ),
     n_synth_family_becomes_winner =
-      sum(
-        synth_family_becomes_winner,
-        na.rm = TRUE
-      ),
+      sum(synth_family_becomes_winner, na.rm = TRUE),
     synth_family_becomes_winner_rate =
-      mean(
-        synth_family_becomes_winner,
-        na.rm = TRUE
-      ),
+      mean(synth_family_becomes_winner, na.rm = TRUE),
     mean_synth_family_rank_change =
-      mean(
-        synth_family_rank_change,
-        na.rm = TRUE
-      ),
-    top1_agreement =
-      mean(top1_agreement, na.rm = TRUE),
-    spearman_rho =
-      mean(spearman_rho, na.rm = TRUE),
-    kendall_tau =
-      mean(kendall_tau, na.rm = TRUE),
+      mean(synth_family_rank_change, na.rm = TRUE),
+    spearman_rho = mean(spearman_rho, na.rm = TRUE),
+    kendall_tau = mean(kendall_tau, na.rm = TRUE),
     .groups = "drop"
   )
  
 ranking_overall <- ranking_metrics %>%
   summarise(
     n_cases = n(),
-    n_reversals =
-      sum(ranking_reversal, na.rm = TRUE),
-    reversal_rate =
-      mean(ranking_reversal, na.rm = TRUE),
+    n_same_best = sum(top1_agreement, na.rm = TRUE),
+    same_best_rate = mean(top1_agreement, na.rm = TRUE),
+    n_different_best = sum(ranking_reversal, na.rm = TRUE),
+    different_best_rate = mean(ranking_reversal, na.rm = TRUE),
+    n_synthetic_best_same_family =
+      sum(synthetic_best_is_same_family, na.rm = TRUE),
+    synthetic_best_same_family_rate =
+      mean(synthetic_best_is_same_family, na.rm = TRUE),
     n_reversals_to_synth_family =
-      sum(
-        reversal_to_synth_family,
-        na.rm = TRUE
-      ),
-    share_reversals_to_synth_family =
-      if_else(
-        n_reversals > 0,
-        n_reversals_to_synth_family /
-          n_reversals,
-        NA_real_
-      ),
+      sum(reversal_to_synth_family, na.rm = TRUE),
+    share_reversals_to_synth_family = if_else(
+      n_different_best > 0,
+      n_reversals_to_synth_family / n_different_best,
+      NA_real_
+    ),
     n_synth_family_becomes_winner =
-      sum(
-        synth_family_becomes_winner,
-        na.rm = TRUE
-      ),
+      sum(synth_family_becomes_winner, na.rm = TRUE),
     synth_family_becomes_winner_rate =
-      mean(
-        synth_family_becomes_winner,
-        na.rm = TRUE
-      )
+      mean(synth_family_becomes_winner, na.rm = TRUE)
   )
  
 readr::write_csv(
   ranking_overall,
   file.path(table_dir, "ranking_overall.csv")
 )
+ 
 readr::write_csv(
   ranking_summary,
   file.path(table_dir, "ranking_summary.csv")
